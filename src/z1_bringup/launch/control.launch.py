@@ -5,8 +5,7 @@ No RViz and no Gazebo - this is the reusable core that the visualisation and
 MoveIt launch files build on.
 
 `hardware_plugin` selects the ros2_control backend:
-  mock_components/GenericSystem      perfect servo, no hardware (default)
-  z1_ros2_control/Z1System           the real arm via z1_controller
+  z1_ros2_control/Z1System           the real arm via z1_controller (default)
   gz_ros2_control/GazeboSimSystem    Gazebo Sim, driven by the gz_ros2_control plugin
 """
 
@@ -44,7 +43,7 @@ def generate_launch_description() -> LaunchDescription:
         ),
         DeclareLaunchArgument(
             "hardware_plugin",
-            default_value="mock_components/GenericSystem",
+            default_value="z1_ros2_control/Z1System",
             description="ros2_control hardware plugin to load",
         ),
     ]

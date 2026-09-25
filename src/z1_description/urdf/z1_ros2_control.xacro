@@ -4,11 +4,9 @@
 
   The arm's command interface depends on the backend:
 
-    mock_components/GenericSystem,
     z1_ros2_control/Z1System          position
         The real Z1 lower-level controller (z1_controller) accepts position
-        commands and runs the joint-level servo law itself; the mock hardware
-        is a perfect position servo, so the same interface works.
+        commands and runs the joint-level servo law itself.
     gz_ros2_control/GazeboSimSystem   effort
         gz_ros2_control's position interface only applies `v = P * e`
         (a single P gain, no D), which makes the joints oscillate against the
@@ -37,10 +35,6 @@
         <ros2_control name="z1" type="system">
             <hardware>
                 <plugin>${hardware_plugin}</plugin>
-                <xacro:if value="${hardware_plugin == 'mock_components/GenericSystem'}">
-                    <!-- Derive velocity from the position commands -->
-                    <param name="calculate_dynamics">true</param>
-                </xacro:if>
             </hardware>
 
             <xacro:z1_joint_interfaces joint_name="joint1"

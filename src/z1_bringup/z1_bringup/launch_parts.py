@@ -1,6 +1,6 @@
 """Launch pieces shared by the z1_bringup launch files.
 
-The mock, Gazebo-servo, Gazebo-ros2_control and MoveIt paths all start the same
+The Gazebo-servo, Gazebo-ros2_control and MoveIt paths all start the same
 robot: one `robot_state_publisher`, one controller set and (in Gazebo) one
 simulator. Everything they have in common lives here so the launch files cannot
 drift apart - in particular the list of controllers that gets spawned.

@@ -5,8 +5,9 @@
   Emitted only when the ros2_control backend is gz_ros2_control/GazeboSimSystem.
   The plugin runs controller_manager inside the Gazebo server, so no
   ros2_control_node is started for this path; the controllers come from
-  `controllers_file` (default z1_bringup/config/z1_controllers.yaml, the
-gz-effort variant passes config/z1_controllers_gz_effort.yaml).
+  `controllers_file` - gazebo_ros2_control.launch.py passes
+  config/z1_controllers_gz_effort.yaml (official torque law), the default here
+  is config/z1_controllers.yaml (plain position servo).
 
   The plugin's own parameters live in that same file (`gz_ros_control:`
   section) - they are only used when a joint still has a position/velocity

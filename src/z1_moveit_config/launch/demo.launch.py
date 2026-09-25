@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """Full Z1 MoveIt 2 demo: robot bringup + move_group + RViz2.
 
-`use_gazebo:=false` (default) puts the mock hardware (a perfect servo) under
-MoveIt. `use_gazebo:=true` puts the Gazebo Sim + ros2_control path of
-z1_bringup there instead, and switches move_group and RViz to the Gazebo clock.
+`use_gazebo:=true` (default) puts the Gazebo Sim + ros2_control path of
+z1_bringup under MoveIt and switches move_group and RViz to the Gazebo clock.
+`use_gazebo:=false` uses z1_bringup/control.launch.py instead, i.e. the real arm
+(`hardware_plugin:=z1_ros2_control/Z1System`).
 `use_gripper:=false` builds the arm-only model (no end effector), which must
 match the URDF that z1_bringup generates.
 
@@ -38,7 +39,7 @@ def _flag(context, name: str, default: str) -> bool:
 
 def _launch_setup(context, *args, **kwargs):
     use_gripper = _flag(context, "use_gripper", "true")
-    use_gazebo = _flag(context, "use_gazebo", "false")
+    use_gazebo = _flag(context, "use_gazebo", "true")
     launch_arg = "true" if use_gripper else "false"
 
     moveit_config = build_moveit_config(use_gripper=use_gripper)
@@ -115,9 +116,12 @@ def generate_launch_description() -> LaunchDescription:
         ),
         DeclareLaunchArgument(
             "use_gazebo",
-            default_value="false",
+            default_value="true",
             choices=["true", "false"],
-            description="Use the Gazebo Sim + ros2_control bringup instead of mock hardware",
+            description=(
+                "Use the Gazebo Sim + ros2_control bringup; use_gazebo:=false "
+                "runs the real arm (z1_ros2_control/Z1System) instead"
+            ),
         ),
         DeclareLaunchArgument(
             "headless",

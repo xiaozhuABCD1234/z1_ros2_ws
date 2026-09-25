@@ -4,7 +4,7 @@ project(z1_bringup)
 find_package(ament_cmake REQUIRED)
 find_package(ament_cmake_python REQUIRED)
 
-# Shared launch helpers (z1_bringup.gz_sim), used by the two Gazebo bringup files.
+# Shared launch helpers (z1_bringup.launch_parts), used by every bringup launch file.
 ament_python_install_package(${PROJECT_NAME})
 
 install(

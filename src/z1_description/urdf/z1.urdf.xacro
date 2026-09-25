@@ -5,9 +5,8 @@
   xacro args:
     use_gripper       (bool, true)  : attach the Unitree gripper
     hardware_plugin   (string)      : ros2_control backend
-                                      mock_components/GenericSystem (default)
-                                      z1_ros2_control/Z1System
-                                      gz_ros2_control/GazeboSimSystem
+                                      z1_ros2_control/Z1System (default, real arm)
+                                      gz_ros2_control/GazeboSimSystem (Gazebo Sim)
     use_gazebo        (bool, false) : add the gz-sim JointPositionController
                                       servos (standalone Gazebo path, without
                                       ros2_control)
@@ -18,7 +17,7 @@
 <robot name="z1" xmlns:xacro="http://www.ros.org/wiki/xacro">
 
     <xacro:arg name="use_gripper" default="true"/>
-    <xacro:arg name="hardware_plugin" default="mock_components/GenericSystem"/>
+    <xacro:arg name="hardware_plugin" default="z1_ros2_control/Z1System"/>
     <xacro:arg name="use_gazebo" default="false"/>
     <xacro:arg name="use_world_link" default="true"/>
     <xacro:arg name="controllers_file"

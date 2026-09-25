@@ -43,7 +43,6 @@ def generate_launch_description() -> LaunchDescription:
                 xacro_file,
                 " use_gripper:=",
                 LaunchConfiguration("use_gripper"),
-                " hardware_plugin:=mock_components/GenericSystem",
                 " use_gazebo:=false",
             ]
         ),

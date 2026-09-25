@@ -21,9 +21,11 @@ CONTROLLERS_ARM_ONLY = "config/moveit_controllers_no_gripper.yaml"
 
 
 def _xacro_args(use_gripper: bool) -> dict:
+    # `hardware_plugin` is left at its default: MoveIt only reads the URDF, it
+    # never loads the hardware, and the arm's command interface is `position`
+    # on the real-arm backend, which is what moveit_controllers.yaml maps.
     return {
         "use_gripper": "true" if use_gripper else "false",
-        "hardware_plugin": "mock_components/GenericSystem",
         "use_gazebo": "false",
     }
 

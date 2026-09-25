@@ -5,7 +5,7 @@
   <version>0.1.0</version>
   <description>
     Bringup launch files and controller configuration for the Unitree Z1 arm:
-    Gazebo Sim simulation and ros2_control (mock hardware / real arm).
+    Gazebo Sim simulation and ros2_control (real arm).
   </description>
 
   <maintainer email="xiaozhu@todo.todo">xiaozhu</maintainer>
@@ -17,7 +17,6 @@
   <exec_depend>z1_description</exec_depend>
   <exec_depend>xacro</exec_depend>
   <exec_depend>robot_state_publisher</exec_depend>
-  <exec_depend>joint_state_publisher_gui</exec_depend>
   <exec_depend>rviz2</exec_depend>
   <exec_depend>launch</exec_depend>
   <exec_depend>launch_ros</exec_depend>
