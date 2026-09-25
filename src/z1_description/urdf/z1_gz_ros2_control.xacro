@@ -1,0 +1,35 @@
+<?xml version="1.0"?>
+<!--
+  gz_ros2_control hook.
+
+  Emitted only when the ros2_control backend is gz_ros2_control/GazeboSimSystem.
+  The plugin runs controller_manager inside the Gazebo server, so no
+  ros2_control_node is started for this path; the controllers come from
+  `controllers_file` (default z1_bringup/config/z1_controllers.yaml, the
+gz-effort variant passes config/z1_controllers_gz_effort.yaml).
+
+  The plugin's own parameters live in that same file (`gz_ros_control:`
+  section) - they are only used when a joint still has a position/velocity
+  command interface.
+
+  Note: plugin parameters put into this <plugin> element (e.g.
+  position_proportional_gain) do not reach the plugin on the URDF -> SDF path,
+  so they are configured through <parameters> below instead.
+-->
+<robot xmlns:xacro="http://www.ros.org/wiki/xacro">
+
+    <xacro:macro name="z1_gz_ros2_control" params="hardware_plugin controllers_file:='$(find z1_bringup)/config/z1_controllers.yaml'">
+        <xacro:if value="${hardware_plugin == 'gz_ros2_control/GazeboSimSystem'}">
+            <gazebo>
+                <plugin filename="gz_ros2_control-system"
+                        name="gz_ros2_control::GazeboSimROS2ControlPlugin">
+                    <parameters>${controllers_file}</parameters>
+                    <ros>
+                        <remapping>~/robot_description:=/robot_description</remapping>
+                    </ros>
+                </plugin>
+            </gazebo>
+        </xacro:if>
+    </xacro:macro>
+
+</robot>

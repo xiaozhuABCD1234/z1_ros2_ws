@@ -1,0 +1,91 @@
+# controller_manager configuration for the Z1 arm on the Gazebo Sim path.
+#
+# Same controller names as config/z1_controllers.yaml, so MoveIt's controller
+# mapping (config/moveit_controllers.yaml) and RViz do not change - but the
+# trajectory controller applies the official Unitree torque law instead of
+# gz_ros2_control's single-P-gain position servo:
+#
+#   tau = Kp * (q_des - q) + Kd * (qdot_des - qdot),  clamped to the effort limit
+#
+# Gains are the ones listed in the official Unitree description
+# (robots/z1_description/config/robot_control.yaml: pid: {p: 300, i: 0, d: 5}).
+# The joints' effort command interfaces come from z1_description
+# (z1_ros2_control.xacro switches to `effort` for the Gazebo backend).
+
+controller_manager:
+  ros__parameters:
+    update_rate: 250  # Hz, matches z1_controller: CtrlComponents::dt = 1/250 s
+
+    joint_state_broadcaster:
+      type: joint_state_broadcaster/JointStateBroadcaster
+
+    joint_trajectory_controller:
+      type: z1_controllers/Z1JointTrajectoryController
+
+    gripper_controller:
+      type: position_controllers/GripperActionController
+
+joint_trajectory_controller:
+  ros__parameters:
+    joints:
+      - joint1
+      - joint2
+      - joint3
+      - joint4
+      - joint5
+      - joint6
+
+    # Official Unitree servo gains (torque per rad, torque per rad/s).
+    gains:
+      joint1: {p: 300.0, d: 5.0}
+      joint2: {p: 300.0, d: 5.0}
+      joint3: {p: 300.0, d: 5.0}
+      joint4: {p: 300.0, d: 5.0}
+      joint5: {p: 300.0, d: 5.0}
+      joint6: {p: 300.0, d: 5.0}
+
+    # Torque clamp = the joint's URDF effort limit (const.xacro: torqueMax,
+    # doubled for joint2).
+    effort_limits:
+      joint1: 30.0
+      joint2: 60.0
+      joint3: 30.0
+      joint4: 30.0
+      joint5: 30.0
+      joint6: 30.0
+
+    # Parking pose driven to on activation (SRDF "ready"). The zero pose sits
+    # exactly on joint2's lower and joint3's upper limit, i.e. on the boundary,
+    # and MoveIt rejects a start state that is outside the limits even by
+    # 1e-14 rad - the gravity sag around that pose goes both ways.
+    initial_position: [0.0, 0.9, -0.9, 0.6, 0.3, 0.0]
+    initial_position_speed: 0.8   # rad/s
+
+    # 积分项：消除重力造成的稳态差，让臂真正停在规划位姿上（官方 yaml 里 i = 0，
+    # 因为官方用的是位置伺服；力矩接口没有它就会差几毫米到一两厘米）。
+    i_gain: 120.0            # 1/s
+    i_limit: 4.0             # N*m，积分状态限幅
+    i_deadband: 0.002        # rad，误差小于它就不再积分（避免摩擦/接触引起的极限环）
+    i_velocity_gate: 0.0     # rad/s，0 = 不启用（有静摩擦抖动时这个门会挡住积分）
+
+    # 参考值离限位至少留 0.02 rad。太小会重现 "Start state out of bounds"，
+    # 太大会让你拖到的位姿停不到位，这就是这个值存在的取舍。
+    boundary_margin: 0.02   # rad
+
+    constraints:
+      stopped_velocity_tolerance: 0.05
+      goal_time: 0.5
+      joint1: {trajectory: 0.25, goal: 0.05}
+      joint2: {trajectory: 0.25, goal: 0.05}
+      joint3: {trajectory: 0.25, goal: 0.05}
+      joint4: {trajectory: 0.25, goal: 0.05}
+      joint5: {trajectory: 0.25, goal: 0.05}
+      joint6: {trajectory: 0.25, goal: 0.05}
+
+gripper_controller:
+  ros__parameters:
+    joint: jointGripper
+    goal_tolerance: 0.01
+    allow_stalling: true
+    stall_velocity_threshold: 0.01
+    stall_timeout: 1.0

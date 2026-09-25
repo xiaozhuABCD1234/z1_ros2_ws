@@ -1,0 +1,8 @@
+# Minimal bridge for the gz_ros2_control path: ros2_control lives inside the
+# Gazebo server, so only the clock has to be bridged (joint states come from
+# joint_state_broadcaster and commands never leave the process).
+- ros_topic_name: /clock
+  gz_topic_name: /clock
+  ros_type_name: rosgraph_msgs/msg/Clock
+  gz_type_name: gz.msgs.Clock
+  direction: GZ_TO_ROS

@@ -1,0 +1,30 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>z1_description</name>
+  <version>0.1.0</version>
+  <description>
+    URDF / xacro description of the Unitree Z1 arm, ported to ROS 2.
+    Meshes and inertias come from unitreerobotics/unitree_ros (BSD-3-Clause).
+  </description>
+
+  <maintainer email="xiaozhu@todo.todo">xiaozhu</maintainer>
+  <license>BSD-3-Clause</license>
+
+  <buildtool_depend>ament_cmake</buildtool_depend>
+
+  <exec_depend>xacro</exec_depend>
+  <exec_depend>robot_state_publisher</exec_depend>
+  <exec_depend>joint_state_publisher_gui</exec_depend>
+  <exec_depend>rviz2</exec_depend>
+  <exec_depend>launch</exec_depend>
+  <exec_depend>launch_ros</exec_depend>
+
+  <export>
+    <build_type>ament_cmake</build_type>
+    <!-- Puts <install>/share on GZ_SIM_RESOURCE_PATH so that the URDF->SDF
+         conversion of the mesh collisions (model://z1_description/...) can be
+         resolved by gz-sim. -->
+    <gazebo_ros gazebo_model_path="${prefix}/.."/>
+  </export>
+</package>

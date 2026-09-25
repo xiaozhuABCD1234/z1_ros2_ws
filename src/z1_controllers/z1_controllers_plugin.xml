@@ -1,0 +1,12 @@
+<library path="z1_joint_trajectory_controller">
+  <class name="z1_controllers/Z1JointTrajectoryController"
+         type="z1_controllers::Z1JointTrajectoryController"
+         base_class_type="controller_interface::ControllerInterface">
+    <description>
+      Torque (effort) controller for the Z1 arm that executes FollowJointTrajectory
+      goals with the official Unitree torque law
+      (tau = Kp*(q_des - q) + Kd*(qdot_des - qdot), clamped to the effort limit)
+      and writes to the joints' effort command interfaces.
+    </description>
+  </class>
+</library>

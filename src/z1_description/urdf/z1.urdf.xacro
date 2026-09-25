@@ -1,0 +1,54 @@
+<?xml version="1.0"?>
+<!--
+  Top level Z1 description.
+
+  xacro args:
+    use_gripper       (bool, true)  : attach the Unitree gripper
+    hardware_plugin   (string)      : ros2_control backend
+                                      mock_components/GenericSystem (default)
+                                      z1_ros2_control/Z1System
+                                      gz_ros2_control/GazeboSimSystem
+    use_gazebo        (bool, false) : add the gz-sim JointPositionController
+                                      servos (standalone Gazebo path, without
+                                      ros2_control)
+    use_world_link    (bool, true)  : add a "world" link and fix the arm base to it
+    controllers_file  (string)      : controller_manager parameter file used by the
+                                      gz_ros2_control plugin (Gazebo backend only)
+-->
+<robot name="z1" xmlns:xacro="http://www.ros.org/wiki/xacro">
+
+    <xacro:arg name="use_gripper" default="true"/>
+    <xacro:arg name="hardware_plugin" default="mock_components/GenericSystem"/>
+    <xacro:arg name="use_gazebo" default="false"/>
+    <xacro:arg name="use_world_link" default="true"/>
+    <xacro:arg name="controllers_file"
+               default="$(find z1_bringup)/config/z1_controllers.yaml"/>
+
+    <xacro:include filename="$(find z1_description)/urdf/const.xacro"/>
+    <xacro:include filename="$(find z1_description)/urdf/z1_body.xacro"/>
+    <xacro:include filename="$(find z1_description)/urdf/z1_ros2_control.xacro"/>
+    <xacro:include filename="$(find z1_description)/urdf/z1_gz_ros2_control.xacro"/>
+    <xacro:include filename="$(find z1_description)/urdf/z1_gazebo.xacro"/>
+
+    <!-- Fixed base: keeps the arm upright in Gazebo / RViz -->
+    <xacro:if value="$(arg use_world_link)">
+        <link name="world"/>
+        <joint name="world_to_base" type="fixed">
+            <origin rpy="0 0 0" xyz="0 0 0"/>
+            <parent link="world"/>
+            <child link="link00"/>
+        </joint>
+    </xacro:if>
+
+    <xacro:z1_body use_gripper="$(arg use_gripper)"/>
+
+    <xacro:z1_ros2_control use_gripper="$(arg use_gripper)"
+                           hardware_plugin="$(arg hardware_plugin)"/>
+    <xacro:z1_gz_ros2_control hardware_plugin="$(arg hardware_plugin)"
+                              controllers_file="$(arg controllers_file)"/>
+
+    <xacro:if value="$(arg use_gazebo)">
+        <xacro:z1_gazebo use_gripper="$(arg use_gripper)"/>
+    </xacro:if>
+
+</robot>

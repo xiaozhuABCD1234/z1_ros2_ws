@@ -1,0 +1,83 @@
+<?xml version="1.0"?>
+<!--
+  Gazebo Sim (Harmonic / gz-sim 8) hooks.
+
+  gz_ros2_control is intentionally NOT used here: the joints are driven by the
+  gz built-in JointPositionController systems and bridged to ROS 2
+  (see z1_bringup/config/ros_gz_bridge.yaml). This keeps the Gazebo path
+  independent from the ros2_control path, so both can be tested separately.
+
+  The servos run in *force* mode (<use_velocity_commands>false</use_velocity_commands>),
+  i.e. gz applies
+
+      tau = p_gain * (q_cmd - q) + d_gain * (0 - qdot)      [clamped to cmd_min/cmd_max]
+
+  which is the same control law as the official Unitree controller
+  (`unitree_legged_control/src/unitree_joint_control_tool.cpp`:
+  calcTorque = posStiffness*(targetPos-currentPos)
+             + velStiffness*(targetVel-currentVel) + targetTorque,
+  then clamped to the URDF effort limit). Gains p=300, i=0, d=5 are the ones
+  listed in the official `robots/z1_description/config/robot_control.yaml`
+  (note: those yaml gains are compiled out in the official C++ controller,
+  which takes Kp/Kd from the incoming MotorCmd instead).
+
+  Note: the position servos must be model level plugins (they look joints up in
+  the model), hence they are all emitted inside a single <gazebo> block.
+-->
+<robot xmlns:xacro="http://www.ros.org/wiki/xacro">
+
+    <!-- Torque PD position servo for one joint, official Unitree gains.
+         `effort` mirrors the joint's URDF limit (const.xacro: torqueMax,
+         60 N*m for joint2) and becomes the torque clamp. -->
+    <xacro:macro name="z1_gz_position_servo_plugin"
+                 params="joint_name effort:=${torqueMax} p_gain:=300.0 i_gain:=0.0 d_gain:=5.0">
+        <plugin filename="gz-sim-joint-position-controller-system"
+                name="gz::sim::systems::JointPositionController">
+            <joint_name>${joint_name}</joint_name>
+            <topic>${joint_name}/cmd_pos</topic>
+            <p_gain>${p_gain}</p_gain>
+            <i_gain>${i_gain}</i_gain>
+            <d_gain>${d_gain}</d_gain>
+            <i_max>0.0</i_max>
+            <i_min>0.0</i_min>
+            <cmd_max>${effort}</cmd_max>
+            <cmd_min>-${effort}</cmd_min>
+            <use_velocity_commands>false</use_velocity_commands>
+            <initial_position>0.0</initial_position>
+        </plugin>
+    </xacro:macro>
+
+    <xacro:macro name="z1_gazebo" params="use_gripper">
+
+        <!-- Self collision, mirrors the ROS 1 gazebo.xacro of unitree_ros -->
+        <gazebo reference="link04"><selfCollide>true</selfCollide></gazebo>
+        <gazebo reference="link05"><selfCollide>true</selfCollide></gazebo>
+        <gazebo reference="link06"><selfCollide>true</selfCollide></gazebo>
+        <xacro:if value="${use_gripper}">
+            <gazebo reference="gripperStator"><selfCollide>true</selfCollide></gazebo>
+            <gazebo reference="gripperMover"><selfCollide>true</selfCollide></gazebo>
+        </xacro:if>
+
+        <gazebo>
+            <!-- Joint states: gz.msgs.Model -> sensor_msgs/msg/JointState -->
+            <plugin filename="gz-sim-joint-state-publisher-system"
+                    name="gz::sim::systems::JointStatePublisher">
+                <topic>joint_states</topic>
+                <update_rate>100</update_rate>
+            </plugin>
+
+            <!-- One position controller per actuated joint -->
+            <xacro:z1_gz_position_servo_plugin joint_name="joint1"/>
+            <xacro:z1_gz_position_servo_plugin joint_name="joint2" effort="${2*torqueMax}"/>
+            <xacro:z1_gz_position_servo_plugin joint_name="joint3"/>
+            <xacro:z1_gz_position_servo_plugin joint_name="joint4"/>
+            <xacro:z1_gz_position_servo_plugin joint_name="joint5"/>
+            <xacro:z1_gz_position_servo_plugin joint_name="joint6"/>
+            <xacro:if value="${use_gripper}">
+                <xacro:z1_gz_position_servo_plugin joint_name="jointGripper"/>
+            </xacro:if>
+        </gazebo>
+
+    </xacro:macro>
+
+</robot>

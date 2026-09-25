@@ -1,0 +1,58 @@
+# controller_manager configuration for the Z1 arm.
+#
+# update_rate matches z1_controller: CtrlComponents::dt = 1/250 s.
+# The gripper controller is only spawned when use_gripper:=true.
+
+controller_manager:
+  ros__parameters:
+    update_rate: 250  # Hz
+
+    joint_state_broadcaster:
+      type: joint_state_broadcaster/JointStateBroadcaster
+
+    joint_trajectory_controller:
+      type: joint_trajectory_controller/JointTrajectoryController
+
+    gripper_controller:
+      type: position_controllers/GripperActionController
+
+# Read by the gz_ros2_control plugin node (only exists on the Gazebo path).
+# The plugin turns position commands into velocity commands with this single
+# P gain; its built-in default of 0.1 makes the joints lag far behind the
+# trajectory and joint_trajectory_controller then aborts with a path tolerance
+# violation. Setting it inside the <plugin> element of the URDF does not reach
+# the plugin, so it is configured here.
+gz_ros_control:
+  ros__parameters:
+    position_proportional_gain: 50.0
+
+joint_trajectory_controller:
+  ros__parameters:
+    joints:
+      - joint1
+      - joint2
+      - joint3
+      - joint4
+      - joint5
+      - joint6
+    command_interfaces: [position]
+    state_interfaces: [position, velocity]
+    allow_partial_joints_goal: false
+    open_loop_control: false
+    constraints:
+      stopped_velocity_tolerance: 0.05
+      goal_time: 0.0
+      joint1: {trajectory: 0.2, goal: 0.05}
+      joint2: {trajectory: 0.2, goal: 0.05}
+      joint3: {trajectory: 0.2, goal: 0.05}
+      joint4: {trajectory: 0.2, goal: 0.05}
+      joint5: {trajectory: 0.2, goal: 0.05}
+      joint6: {trajectory: 0.2, goal: 0.05}
+
+gripper_controller:
+  ros__parameters:
+    joint: jointGripper
+    goal_tolerance: 0.01
+    allow_stalling: true
+    stall_velocity_threshold: 0.01
+    stall_timeout: 1.0

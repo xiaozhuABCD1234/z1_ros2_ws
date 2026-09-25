@@ -1,0 +1,64 @@
+<?xml version="1.0"?>
+<!--
+  Arm-only SRDF: 6 joints, no gripper / end effector.
+
+  Selected automatically by moveit_config.py when use_gripper:=false, i.e.
+  when the URDF has no gripperStator / gripperMover / jointGripper. Keep the
+  arm-related entries in sync with config/z1.srdf.
+-->
+<robot name="z1">
+
+  <!-- Planning group -->
+  <group name="arm">
+    <chain base_link="link00" tip_link="link06"/>
+  </group>
+
+  <!-- Named states -->
+  <group_state name="zero" group="arm">
+    <joint name="joint1" value="0"/>
+    <joint name="joint2" value="0"/>
+    <joint name="joint3" value="0"/>
+    <joint name="joint4" value="0"/>
+    <joint name="joint5" value="0"/>
+    <joint name="joint6" value="0"/>
+  </group_state>
+  <group_state name="ready" group="arm">
+    <joint name="joint1" value="0"/>
+    <joint name="joint2" value="0.9"/>
+    <joint name="joint3" value="-0.9"/>
+    <joint name="joint4" value="0.6"/>
+    <joint name="joint5" value="0.3"/>
+    <joint name="joint6" value="0"/>
+  </group_state>
+
+  <!--
+    Collision matrix.
+    Adjacent pairs must be disabled (their collision geometry always touches);
+    the "Never" entries are pairs that cannot touch within the joint limits.
+  -->
+  <disable_collisions link1="link00" link2="link01" reason="Adjacent"/>
+  <disable_collisions link1="link01" link2="link02" reason="Adjacent"/>
+  <disable_collisions link1="link02" link2="link03" reason="Adjacent"/>
+  <disable_collisions link1="link03" link2="link04" reason="Adjacent"/>
+  <disable_collisions link1="link04" link2="link05" reason="Adjacent"/>
+  <disable_collisions link1="link05" link2="link06" reason="Adjacent"/>
+
+  <disable_collisions link1="link00" link2="link02" reason="Never"/>
+  <disable_collisions link1="link01" link2="link03" reason="Never"/>
+  <disable_collisions link1="link02" link2="link04" reason="Never"/>
+  <disable_collisions link1="link03" link2="link05" reason="Never"/>
+  <disable_collisions link1="link04" link2="link06" reason="Never"/>
+
+  <!--
+    link02 (shoulder motor) vs link06 (wrist motor):
+    in the parking pose (all joints at 0, "zero" above) the wrist ends up right
+    above the shoulder motor. The official URDF approximates both housings as
+    full 65 mm cylinders, which interpenetrate by 8 mm there and therefore make
+    the parking pose a *start state in collision* - MoveIt would refuse to plan
+    from the documented zero pose. Real housings are not full cylinders, so the
+    pair is disabled. Re-enable it if you replace the collision primitives with
+    meshes.
+  -->
+  <disable_collisions link1="link02" link2="link06" reason="Never"/>
+
+</robot>

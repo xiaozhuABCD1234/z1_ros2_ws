@@ -1,0 +1,29 @@
+# Controller mapping for MoveIt's simple controller manager - arm only.
+# Used when use_gripper:=false (no gripper_controller on the ros2_control side).
+# Keep the arm entries in sync with config/moveit_controllers.yaml.
+
+moveit_controller_manager: moveit_simple_controller_manager/MoveItSimpleControllerManager
+
+# On the Gazebo path the joints are held by gz_ros2_control's P-only servo
+# (position_proportional_gain: 50) against dartsim friction, so the measured
+# positions keep wobbling around the commanded value by ~0.02 rad. MoveIt's
+# default start-state tolerance of 0.01 rad then rejects every execution with
+# "start point deviates from current robot state".
+trajectory_execution:
+  allowed_start_tolerance: 0.05
+
+moveit_simple_controller_manager:
+  controller_names:
+    - joint_trajectory_controller
+
+  joint_trajectory_controller:
+    type: FollowJointTrajectory
+    action_ns: follow_joint_trajectory
+    default: true
+    joints:
+      - joint1
+      - joint2
+      - joint3
+      - joint4
+      - joint5
+      - joint6

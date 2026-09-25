@@ -1,0 +1,65 @@
+<?xml version="1.0"?>
+<!--
+  ros2_control description of the Z1.
+
+  The arm's command interface depends on the backend:
+
+    mock_components/GenericSystem,
+    z1_ros2_control/Z1System          position
+        The real Z1 lower-level controller (z1_controller) accepts position
+        commands and runs the joint-level servo law itself; the mock hardware
+        is a perfect position servo, so the same interface works.
+    gz_ros2_control/GazeboSimSystem   effort
+        gz_ros2_control's position interface only applies `v = P * e`
+        (a single P gain, no D), which makes the joints oscillate against the
+        dartsim joint friction. Declaring the effort interface instead lets
+        z1_controllers/Z1JointTrajectoryController apply the official Unitree
+        torque law (tau = Kp*e + Kd*edot, clamped to the effort limit).
+
+  The gripper keeps its position interface: it is driven by a position
+  controller (GripperActionController) on every backend.
+-->
+<robot xmlns:xacro="http://www.ros.org/wiki/xacro">
+
+    <!-- One actuated joint of the arm / gripper -->
+    <xacro:macro name="z1_joint_interfaces" params="joint_name command_interface">
+        <joint name="${joint_name}">
+            <command_interface name="${command_interface}"/>
+            <state_interface name="position"/>
+            <state_interface name="velocity"/>
+            <state_interface name="effort"/>
+        </joint>
+    </xacro:macro>
+
+    <xacro:macro name="z1_ros2_control" params="use_gripper hardware_plugin">
+        <xacro:property name="arm_command_interface"
+                        value="${'effort' if hardware_plugin == 'gz_ros2_control/GazeboSimSystem' else 'position'}"/>
+        <ros2_control name="z1" type="system">
+            <hardware>
+                <plugin>${hardware_plugin}</plugin>
+                <xacro:if value="${hardware_plugin == 'mock_components/GenericSystem'}">
+                    <!-- Derive velocity from the position commands -->
+                    <param name="calculate_dynamics">true</param>
+                </xacro:if>
+            </hardware>
+
+            <xacro:z1_joint_interfaces joint_name="joint1"
+                                       command_interface="${arm_command_interface}"/>
+            <xacro:z1_joint_interfaces joint_name="joint2"
+                                       command_interface="${arm_command_interface}"/>
+            <xacro:z1_joint_interfaces joint_name="joint3"
+                                       command_interface="${arm_command_interface}"/>
+            <xacro:z1_joint_interfaces joint_name="joint4"
+                                       command_interface="${arm_command_interface}"/>
+            <xacro:z1_joint_interfaces joint_name="joint5"
+                                       command_interface="${arm_command_interface}"/>
+            <xacro:z1_joint_interfaces joint_name="joint6"
+                                       command_interface="${arm_command_interface}"/>
+            <xacro:if value="${use_gripper}">
+                <xacro:z1_joint_interfaces joint_name="jointGripper"
+                                           command_interface="position"/>
+            </xacro:if>
+        </ros2_control>
+    </xacro:macro>
+
+</robot>
