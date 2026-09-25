@@ -28,7 +28,7 @@ ros2 run xacro xacro $(ros2 pkg prefix z1_description)/share/z1_description/urdf
 | 参数 | 默认值 | 作用 |
 |---|---|---|
 | `use_gripper` | `true` | 附加 `gripperStator` / `gripperMover` 与 `jointGripper` |
-| `hardware_plugin` | `mock_components/GenericSystem` | ros2_control 后端：`mock_components/GenericSystem`、`z1_ros2_control/Z1System`（真机）或 `gz_ros2_control/GazeboSimSystem`（Gazebo） |
+| `hardware_plugin` | `z1_ros2_control/Z1System` | ros2_control 后端：`z1_ros2_control/Z1System`（真机）或 `gz_ros2_control/GazeboSimSystem`（Gazebo） |
 | `use_gazebo` | `false` | 加入 gz-sim 的 `JointStatePublisher`，并为每个关节加一个 `JointPositionController`（独立 Gazebo 路径，不使用 ros2_control） |
 | `use_world_link` | `true` | 加入 `world` link，并把 `link00` 固定到它上面（固定基座） |
 
@@ -58,7 +58,7 @@ ros2 run xacro xacro $(ros2 pkg prefix z1_description)/share/z1_description/urdf
   换 effort 后由 `z1_controllers` 施加官方力矩律）。夹爪在所有后端都是 `position`。
 * 状态：`position`、`velocity`、`effort`
 
-声明 `effort` 是为了便于查看；真机提供的是 `tau` 反馈，虚拟硬件则上报为 0。
+声明 `effort` 是为了便于查看；真机控制器的 `tau` 反馈即为 effort 状态，Gazebo 后端由 dartsim 上报。
 
 ## 许可证
 

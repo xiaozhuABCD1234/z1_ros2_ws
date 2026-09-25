@@ -26,7 +26,7 @@ calcTorque = posStiffness*(targetPos-currentPos)
 
 Gazebo 后端上，`gz_ros2_control` 的位置接口只有 `v = P·e`（单一 P 增益，没有 D），
 配上 URDF 里 1.0 N·m 的关节摩擦就是个极限环：关节在指令值附近持续晃动
-（实测 ready 位姿 std 0.006–0.015 rad、峰峰最大 0.076 rad），把 P 从 50 提到 300
+（在停靠位姿上实测 std 0.006–0.015 rad、峰峰最大 0.076 rad），把 P 从 50 提到 300
 毫无改善。换成本控制器（`effort` 接口 + PD）后实测 std ≤ 0.006、峰峰 ≤ 0.013 rad，
 MoveGroup 的 plan+execute 正常。
 
@@ -59,8 +59,8 @@ joint_trajectory_controller:
       goal_time: 0.5
       joint1: {trajectory: 0.25, goal: 0.05}
       ...
-    # 激活后限速滑到这个位姿再停住（见下）
-    initial_position: [0.0, 0.9, -0.9, 0.6, 0.3, 0.0]
+    # 激活后限速滑到这个位姿再停住（见下），值 = 官方 forward 位姿
+    initial_position: [0.0, 1.5, -1.0, -0.54, 0.0, 0.0]
     initial_position_speed: 0.8
 ```
 
@@ -73,12 +73,12 @@ joint_trajectory_controller:
 |---|---|
 | `joints` | 受控关节，顺序即命令顺序 |
 | `gains.<joint>.{p,d}` | PD 增益（默认 300 / 5） |
-| `effort_limits.<joint>` | 力矩限幅（默认 30，joint2 用 60） |
+| `effort_limits.<joint>` | 力矩限幅（代码默认 30；`z1_controllers_gz_effort.yaml` 里 joint2 = 60，与 URDF 一致） |
 | `constraints.<joint>.{trajectory,goal}` | 路径/目标容差（默认 0.2 / 0.05 rad） |
 | `constraints.goal_time` | 到点后允许的额外时间（默认 0 s） |
 | `position_limits.<joint>.{lower,upper}` | 关节限位（默认 = 官方 URDF 限位），位置参考会被 clamp 到其中 |
-| `boundary_margin` | 参考位置与限位的安全边距（默认 0.05 rad，见下） |
-| `initial_position`, `initial_position_speed` | 激活后的停靠位姿与限速（见下） |
+| `boundary_margin` | 参考位置与限位的安全边距（默认 0.02 rad，见下） |
+| `initial_position`, `initial_position_speed` | 激活后的停靠位姿与限速（后者默认 0.5 rad/s，见下） |
 | `action_monitor_rate` | 动作结果上报频率（默认 20 Hz） |
 
 ## 关于 `initial_position`
@@ -86,9 +86,10 @@ joint_trajectory_controller:
 零位/停放位姿**正好**在 joint2 下限（0）和 joint3 上限（0）上：PD 的重力静差会把实测值
 推到边界外大约 `1e-14` rad，而 MoveIt 2.12 的 `CheckStartStateBounds` 对越界零容忍
 （`Start state out of bounds` → `START_STATE_INVALID`，planning 直接失败）。
-所以控制器激活后会把“保持点”按 `initial_position_speed` 限速滑到 SRDF 的 `ready`
-位姿（`[0, 0.9, -0.9, 0.6, 0.3, 0]`，离限位有 0.3 rad 以上），停在那里等 MoveIt 规划。
-留空则仅保持上电瞬间的位置。
+所以控制器激活后会把“保持点”按 `initial_position_speed` 限速滑到 SRDF 的 `forward`
+位姿（官方值：`[0, 1.5, -1, -0.54, 0, 0]`，来自 `z1_controller/config/`
+`savedArmStates.csv` 与 `z1_sdk` 的 `q_FORWARD`），该位姿最小余量 0.98 rad（joint4），
+joint5 = joint6 = 0。留空则仅保持上电瞬间的位置。
 
 ## 实现要点
 

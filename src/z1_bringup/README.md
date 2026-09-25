@@ -7,12 +7,11 @@ Z1 机械臂的启动文件与控制器配置。
 | 启动文件 | 启动内容 |
 |---|---|
 | `control.launch.py` | **共用核心**：`robot_state_publisher`、`ros2_control_node`、`joint_state_broadcaster`、`joint_trajectory_controller`、`gripper_controller`。不含可视化。 |
-| `mock_hardware.launch.py` | `control.launch.py` + RViz2（虚拟硬件，即理想伺服） |
 | `gazebo.launch.py` | gz-sim 8 + `ros_gz_sim create` + `ros_gz_bridge`，关节由 gz 的 `JointPositionController` 伺服从动（不使用 ros2_control） |
 | `gazebo_ros2_control.launch.py` | gz-sim 8 + `gz_ros2_control`（controller_manager 跑在 Gazebo server 内）+ `/clock` 桥接；默认用**官方力矩律**驱动机械臂（`z1_controllers/Z1JointTrajectoryController` 走 effort 接口） |
 | `../z1_description/launch/display.launch.py` | 仅 URDF：`robot_state_publisher` + `joint_state_publisher_gui` + RViz2 |
 
-参数：`use_gripper`、`use_rviz`，以及各启动文件专属的 `rviz_config`（mock）、
+参数：`use_gripper`、`use_rviz`，以及各启动文件专属的
 `world` / `headless` / `gz_verbosity`（Gazebo）、`hardware_plugin`（control）、
 `controllers_file`（gazebo_ros2_control，默认官方力矩律那一份）。
 
@@ -27,18 +26,17 @@ Z1 机械臂的启动文件与控制器配置。
 
 | 插件 | 含义 |
 |---|---|
-| `mock_components/GenericSystem` | 理想伺服，无硬件（默认） |
-| `z1_ros2_control/Z1System` | 经 `z1_controller` 连接真机（待实现） |
+| `z1_ros2_control/Z1System` | 经 `z1_controller` 连接真机（待实现，**默认**） |
 | `gz_ros2_control/GazeboSimSystem` | Gazebo Sim 物理，供 `gazebo_ros2_control.launch.py` 使用 |
 
-三种情况下控制器、接口和 MoveIt 配置完全相同。
+两种情况下控制器、接口和 MoveIt 配置完全相同。
 
 ## 控制器配置
 
 两份文件，控制器名一样，只是机械臂那个的**类型**不同：
 
 * `config/z1_controllers.yaml` —— 位置接口 + `joint_trajectory_controller/JointTrajectoryController`，
-  用于 mock 硬件与真机（真机的关节伺服律在 `z1_controller` 里）。
+  用于真机（真机的关节伺服律在 `z1_controller` 里）。
 * `config/z1_controllers_gz_effort.yaml` —— effort 接口 + `z1_controllers/Z1JointTrajectoryController`
   （官方力矩律 `τ = Kp·e + Kd·ė`，增益 300/5，限幅 = URDF effort），
   `gazebo_ros2_control.launch.py` 的默认值。两者都继承同一个 `joint_state_broadcaster`
@@ -56,7 +54,7 @@ Z1 机械臂的启动文件与控制器配置。
 
 ## 接口
 
-**ros2_control 路径**（`control.launch.py`、`mock_hardware`、`gazebo_ros2_control`）
+**ros2_control 路径**（`control.launch.py`、`gazebo_ros2_control`）
 
 | 接口 | 类型 |
 |---|---|
@@ -76,7 +74,7 @@ gz 伺服的增益位于 `z1_description/urdf/z1_gazebo.xacro`。
 
 ## 路线图
 
-1. ✅ 虚拟硬件、Gazebo（伺服从动与 ros2_control 两条路径）、MoveIt 2。
+1. ✅ Gazebo（伺服从动与 ros2_control 两条路径）、MoveIt 2。
 2. ⏳ `z1_ros2_control` 硬件接口：链接 `z1_controller` 中的 `libZ1_<arch>.so`
    （FSM、`Z1Model`、`IOUDP` 都在其中，且不依赖 ROS），并以 `SystemInterface`
    的形式暴露出来；之后 `hardware_plugin:=z1_ros2_control/Z1System` 即可把整套栈
@@ -96,3 +94,5 @@ gz 伺服的增益位于 `z1_description/urdf/z1_gazebo.xacro`。
 * 力矩律的 i = 0，所以有重力静差（实测 0.001–0.021 rad）——这是官方行为的原样复现；
   容差留了 0.05 rad 的余量。
 * 真机尚未验证——硬件插件目前还不存在。
+* 已移除 mock 硬件后端（`mock_components/GenericSystem`）：不走 Gazebo、又没接真机时，
+  没有可加载的硬件插件（真机插件待实现），也无法只靠本仓库验证控制器栈。
