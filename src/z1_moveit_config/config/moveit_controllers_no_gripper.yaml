@@ -4,11 +4,10 @@
 
 moveit_controller_manager: moveit_simple_controller_manager/MoveItSimpleControllerManager
 
-# On the Gazebo path the joints are held by gz_ros2_control's P-only servo
-# (position_proportional_gain: 50) against dartsim friction, so the measured
-# positions keep wobbling around the commanded value by ~0.02 rad. MoveIt's
-# default start-state tolerance of 0.01 rad then rejects every execution with
-# "start point deviates from current robot state".
+# On the Gazebo path the arm runs the official torque law, whose integral gain is
+# 0, so gravity leaves a static offset of ~0.001-0.021 rad behind the commanded
+# pose. MoveIt's default start-state tolerance of 0.01 rad then rejects every
+# execution with "start point deviates from current robot state".
 trajectory_execution:
   allowed_start_tolerance: 0.05
 
