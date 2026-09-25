@@ -90,11 +90,9 @@ private:
     std::vector<double> & v) const;
   /// Apply the torque law to every joint; false if a command interface refused
   /// the value (already latched in command_write_failed_).
-  bool write_effort(const std::vector<double> & q, const std::vector<double> & v,
+  bool write_effort(const std::vector<double> & q, const std::vector<double> & qdot,
     const std::vector<double> & q_des, const std::vector<double> & v_des);
   void clamp_to_limits(std::vector<double> & q_des) const;
-  /// Zero the integral terms (new trajectory / deactivate).
-  void reset_integral();
   /// Stop tracking the active trajectory, hold `hold` and queue `outcome`.
   void finish_trajectory(Outcome outcome, const std::vector<double> & hold);
   void action_monitor();
@@ -108,15 +106,7 @@ private:
   std::vector<double> goal_tolerance_;
   std::vector<double> lower_limits_;
   std::vector<double> upper_limits_;
-  std::vector<double> integral_;   // integral of the position error (i_gain > 0 only)
   double boundary_margin_{0.02};   // rad, keep the reference off the hard stops
-  double i_gain_{0.0};             // 1/s, integral action (0 = off, like the official yaml)
-  double i_limit_{5.0};            // N*m, clamp of the integral state
-  double i_deadband_{0.002};       // rad, do not integrate inside this band
-  double i_velocity_gate_{0.05};   // rad/s, integrate only when nearly stopped
-  double period_{0.0};             // s, last update() period
-  bool path_diag_logged_{false};   // one-shot diagnostic for path tolerance
-  static constexpr double windup_threshold_{0.15};  // rad, integrate only when close
   double goal_time_{0.0};
   double monitor_rate_{20.0};
   // Optional parking pose driven to on activation (slew-limited).

@@ -54,22 +54,19 @@ joint_trajectory_controller:
       joint5: 30.0
       joint6: 30.0
 
-    # Parking pose driven to on activation (SRDF "ready"). The zero pose sits
-    # exactly on joint2's lower and joint3's upper limit, i.e. on the boundary,
-    # and MoveIt rejects a start state that is outside the limits even by
-    # 1e-14 rad - the gravity sag around that pose goes both ways.
-    initial_position: [0.0, 0.9, -0.9, 0.6, 0.3, 0.0]
+    # Parking pose driven to on activation (SRDF "forward" = Unitree's official
+    # "forward" pose: z1_controller/config/savedArmStates.csv, z1_sdk
+    # q_FORWARD). The zero pose sits exactly on joint2's lower and joint3's
+    # upper limit, i.e. on the boundary, and MoveIt rejects a start state that
+    # is outside the limits even by 1e-14 rad - the gravity sag around that
+    # pose goes both ways.
+    initial_position: [0.0, 1.5, -1.0, -0.54, 0.0, 0.0]
     initial_position_speed: 0.8   # rad/s
 
-    # 积分项：消除重力造成的稳态差，让臂真正停在规划位姿上（官方 yaml 里 i = 0，
-    # 因为官方用的是位置伺服；力矩接口没有它就会差几毫米到一两厘米）。
-    i_gain: 120.0            # 1/s
-    i_limit: 4.0             # N*m，积分状态限幅
-    i_deadband: 0.002        # rad，误差小于它就不再积分（避免摩擦/接触引起的极限环）
-    i_velocity_gate: 0.0     # rad/s，0 = 不启用（有静摩擦抖动时这个门会挡住积分）
 
-    # 参考值离限位至少留 0.02 rad。太小会重现 "Start state out of bounds"，
-    # 太大会让你拖到的位姿停不到位，这就是这个值存在的取舍。
+    # Keep the reference at least 0.02 rad away from the joint limits. Smaller
+    # values bring back "Start state out of bounds", larger ones stop the arm
+    # short of a pose you drag it to - that is the trade-off behind this value.
     boundary_margin: 0.02   # rad
 
     constraints:

@@ -72,33 +72,6 @@ controller_interface::CallbackReturn Z1JointTrajectoryController::on_init()
   }
   boundary_margin_ = std::max(0.0, node->get_parameter("boundary_margin").get_value<double>());
 
-  // Integral action. The effort interface leaves a steady-state offset: gravity
-  // plus the URDF joint friction (damping/friction = 1.0) hold the arm a few
-  // 1e-2 rad short of the reference, i.e. the simulation stops visibly off the
-  // planned pose. The integral term removes exactly that constant disturbance.
-  // Keep the gain below ~200 for a 250 Hz loop, and freeze it while the error is
-  // large so a big move cannot wind it up.
-  if (!node->has_parameter("i_gain"))
-  {
-    node->declare_parameter("i_gain", i_gain_);
-  }
-  if (!node->has_parameter("i_limit"))
-  {
-    node->declare_parameter("i_limit", i_limit_);
-  }
-  if (!node->has_parameter("i_deadband"))
-  {
-    node->declare_parameter("i_deadband", i_deadband_);
-  }
-  if (!node->has_parameter("i_velocity_gate"))
-  {
-    node->declare_parameter("i_velocity_gate", i_velocity_gate_);
-  }
-  i_gain_ = std::max(0.0, node->get_parameter("i_gain").get_value<double>());
-  i_limit_ = std::max(0.0, node->get_parameter("i_limit").get_value<double>());
-  i_deadband_ = std::max(0.0, node->get_parameter("i_deadband").get_value<double>());
-  i_velocity_gate_ = std::max(0.0, node->get_parameter("i_velocity_gate").get_value<double>());
-  integral_.assign(dof_, 0.0);
 
   for (size_t i = 0; i < dof_; ++i)
   {
@@ -289,7 +262,8 @@ controller_interface::CallbackReturn Z1JointTrajectoryController::on_deactivate(
     }
   }
   has_trajectory_ = false;
-  reset_integral();
+  // Non-realtime context: drop the trajectory that the buffer keeps alive.
+  trajectory_buffer_.writeFromNonRT(std::shared_ptr<const Trajectory>());
   {
     std::lock_guard<std::mutex> lock(goal_mutex_);
     active_goal_.reset();
@@ -354,7 +328,9 @@ void Z1JointTrajectoryController::on_accepted(const std::shared_ptr<GoalHandle> 
   {
     RCLCPP_ERROR(logger, "Rejecting goal after acceptance: %s", error.c_str());
     auto result = std::make_shared<FollowJointTrajectory::Result>();
-    result->error_code = FollowJointTrajectory::Result::INVALID_JOINTS;
+    // The joint names were already validated in on_goal(), so anything that
+    // fails here is a malformed trajectory, not a joint mismatch.
+    result->error_code = FollowJointTrajectory::Result::INVALID_GOAL;
     result->error_string = error;
     goal_handle->abort(result);
     return;
@@ -372,15 +348,13 @@ void Z1JointTrajectoryController::on_accepted(const std::shared_ptr<GoalHandle> 
     active_goal_ = goal_handle;
   }
 
-  // Command the position we are at right now as the trajectory's start, so the
-  // first sample does not see a jump.
+  // The trajectory clock starts now; build_trajectory() has already prepended
+  // the measured position if the message does not start at t = 0.
   trajectory_start_ = get_node()->now();
   trajectory_buffer_.writeFromNonRT(trajectory);
   cancel_requested_ = false;
   outcome_ = Outcome::NONE;
   has_trajectory_ = true;
-  path_diag_logged_ = false;
-  reset_integral();
   ++active_goal_id_;
   RCLCPP_INFO(
     logger, "Accepted trajectory: %zu waypoints, %.3f s.", trajectory->waypoints.size(),
@@ -539,7 +513,6 @@ void Z1JointTrajectoryController::interpolate(
 controller_interface::return_type Z1JointTrajectoryController::update(
   const rclcpp::Time & time, const rclcpp::Duration & period)
 {
-  period_ = period.seconds();
   // The scratch buffers are members so that the realtime loop does not allocate.
   for (size_t i = 0; i < dof_; ++i)
   {
@@ -590,13 +563,6 @@ controller_interface::return_type Z1JointTrajectoryController::update(
       if (error > path_tolerance_[i])
       {
         path_violated = true;
-        if (!path_diag_logged_)
-        {
-          RCLCPP_WARN(get_node()->get_logger(),
-                      "path tolerance: %s q=%.4f q_des=%.4f err=%.4f tol=%.3f t=%.3f dur=%.3f",
-                      joints_[i].c_str(), q_[i], q_des_[i], error, path_tolerance_[i], t,
-                      trajectory->duration);
-        }
       }
       if (t >= trajectory->duration && error > goal_tolerance_[i])
       {
@@ -666,8 +632,13 @@ controller_interface::return_type Z1JointTrajectoryController::update(
 void Z1JointTrajectoryController::finish_trajectory(
   Outcome outcome, const std::vector<double> & hold)
 {
+  // Called from the realtime loop: no locks and no deallocation here. The
+  // trajectory buffer keeps the last shared_ptr alive until the action thread
+  // (on_accepted) or on_deactivate() replaces it, so dropping the final
+  // reference - and with it the waypoint vectors - never happens in RT.
   has_trajectory_ = false;
-  trajectory_buffer_.writeFromNonRT(std::shared_ptr<const Trajectory>());
+  // A real trajectory overrides the parking-pose slew for good.
+  startup_active_ = false;
   hold_position_ = hold;
   outcome_ = outcome;
 }
@@ -695,11 +666,6 @@ void Z1JointTrajectoryController::clamp_to_limits(std::vector<double> & q_des) c
   }
 }
 
-void Z1JointTrajectoryController::reset_integral()
-{
-  std::fill(integral_.begin(), integral_.end(), 0.0);
-}
-
 bool Z1JointTrajectoryController::write_effort(
   const std::vector<double> & q, const std::vector<double> & qdot,
   const std::vector<double> & q_des, const std::vector<double> & v_des)
@@ -714,27 +680,8 @@ bool Z1JointTrajectoryController::write_effort(
     const double velocity_error = v_des[i] - (std::isfinite(qdot[i]) ? qdot[i] : 0.0);
     double torque = kp_[i] * position_error + kd_[i] * velocity_error;
 
-    if (i_gain_ > 0.0 && period_ > 0.0 && std::abs(position_error) < windup_threshold_ &&
-        std::abs(position_error) > i_deadband_ && std::abs(velocity_error) < i_velocity_gate_)
-    {
-      // Integrate only when the joint is close, not already inside the deadband,
-      // and nearly stopped: otherwise the integral fights dry friction or a
-      // contact and turns into a limit cycle (visible jitter).
-      integral_[i] = std::clamp(integral_[i] + position_error * period_, -i_limit_, i_limit_);
-      torque += i_gain_ * integral_[i];
-    }
-    else if (i_gain_ > 0.0)
-    {
-      torque += i_gain_ * integral_[i];
-    }
-
     // Official law clamps the torque to the joint's effort limit.
     torque = std::clamp(torque, -effort_limits_[i], effort_limits_[i]);
-    RCLCPP_INFO_THROTTLE(
-      get_node()->get_logger(), *get_node()->get_clock(), 2000,
-      "DIAG %s: q=%.4f q_des=%.4f e=%.4f tau=%.2f i=%.3f",
-      joints_[i].c_str(), q[i], q_des[i], position_error, torque,
-      i_gain_ > 0.0 ? integral_[i] : 0.0);
     if (!command_interfaces_[i].set_value(torque))
     {
       command_write_failed_ = true;
