@@ -7,6 +7,10 @@ MoveIt launch files build on.
 `hardware_plugin` selects the ros2_control backend:
   z1_ros2_control/Z1System           the real arm via z1_controller (default)
   gz_ros2_control/GazeboSimSystem    Gazebo Sim, driven by the gz_ros2_control plugin
+
+The `ctrl_*` arguments below are only used by the real-arm backend; they are
+passed into the URDF as `<param>` entries of the `<hardware>` block, which is
+where ros2_control reads a component's configuration from.
 """
 
 from launch import LaunchDescription
@@ -23,6 +27,26 @@ from z1_bringup.launch_parts import (
     GRIPPER_CONTROLLER,
     controller_spawner,
 )
+
+# Launch arguments that are forwarded verbatim into the URDF's <hardware> block.
+# Keep this list in sync with the `<param name=...>` entries in
+# z1_description/urdf/z1_ros2_control.xacro.
+HARDWARE_PARAMETERS = [
+    ("ctrl_ip", "127.0.0.1", "Host running z1_ctrl (it must be this machine)"),
+    ("ctrl_port", "8071", "Port z1_ctrl binds"),
+    ("own_port", "8072", "Port this component binds; z1_ctrl sends its state here"),
+    (
+        "activate_fsm_sequence",
+        "JOINTCTRL",
+        "Comma-separated FSM states to request when the hardware is activated",
+    ),
+    (
+        "disconnect_timeout_ms",
+        "200",
+        "Silence from z1_ctrl that is reported as a hardware error",
+    ),
+    ("temperature_limit", "80", "Motor over-temperature limit in Celsius"),
+]
 
 
 def generate_launch_description() -> LaunchDescription:
@@ -46,22 +70,18 @@ def generate_launch_description() -> LaunchDescription:
             default_value="z1_ros2_control/Z1System",
             description="ros2_control hardware plugin to load",
         ),
+    ] + [
+        DeclareLaunchArgument(name, default_value=default, description=description)
+        for name, default, description in HARDWARE_PARAMETERS
     ]
 
-    robot_description = ParameterValue(
-        Command(
-            [
-                "xacro ",
-                xacro_file,
-                " use_gripper:=",
-                use_gripper,
-                " hardware_plugin:=",
-                LaunchConfiguration("hardware_plugin"),
-                " use_gazebo:=false",
-            ]
-        ),
-        value_type=str,
-    )
+    xacro_args = ["xacro ", xacro_file, " use_gripper:=", use_gripper]
+    xacro_args += [" hardware_plugin:=", LaunchConfiguration("hardware_plugin")]
+    xacro_args += [" use_gazebo:=false"]
+    for name, _default, _description in HARDWARE_PARAMETERS:
+        xacro_args += [" ", name, ":=", LaunchConfiguration(name)]
+
+    robot_description = ParameterValue(Command(xacro_args), value_type=str)
 
     spawner_args = ["--controller-manager", CONTROLLER_MANAGER]
 

@@ -16,6 +16,10 @@
 
   The gripper keeps its position interface: it is driven by a position
   controller (GripperActionController) on every backend.
+
+  Only the real-arm block is async. `gz_ros2_control` builds its own component
+  and must not be forced onto our 500 Hz worker thread; keeping the two blocks
+  apart also keeps the Gazebo path's URDF free of parameters it would ignore.
 -->
 <robot xmlns:xacro="http://www.ros.org/wiki/xacro">
 
@@ -29,31 +33,77 @@
         </joint>
     </xacro:macro>
 
-    <xacro:macro name="z1_ros2_control" params="use_gripper hardware_plugin">
-        <xacro:property name="arm_command_interface"
-                        value="${'effort' if hardware_plugin == 'gz_ros2_control/GazeboSimSystem' else 'position'}"/>
-        <ros2_control name="z1" type="system">
-            <hardware>
-                <plugin>${hardware_plugin}</plugin>
-            </hardware>
+    <!-- The joint set, shared by the two <ros2_control> blocks below so they
+         cannot drift apart. -->
+    <xacro:macro name="z1_ros2_control_joints" params="use_gripper command_interface">
+        <xacro:z1_joint_interfaces joint_name="joint1"
+                                   command_interface="${command_interface}"/>
+        <xacro:z1_joint_interfaces joint_name="joint2"
+                                   command_interface="${command_interface}"/>
+        <xacro:z1_joint_interfaces joint_name="joint3"
+                                   command_interface="${command_interface}"/>
+        <xacro:z1_joint_interfaces joint_name="joint4"
+                                   command_interface="${command_interface}"/>
+        <xacro:z1_joint_interfaces joint_name="joint5"
+                                   command_interface="${command_interface}"/>
+        <xacro:z1_joint_interfaces joint_name="joint6"
+                                   command_interface="${command_interface}"/>
+        <xacro:if value="${use_gripper}">
+            <xacro:z1_joint_interfaces joint_name="jointGripper"
+                                       command_interface="position"/>
+        </xacro:if>
+    </xacro:macro>
 
-            <xacro:z1_joint_interfaces joint_name="joint1"
-                                       command_interface="${arm_command_interface}"/>
-            <xacro:z1_joint_interfaces joint_name="joint2"
-                                       command_interface="${arm_command_interface}"/>
-            <xacro:z1_joint_interfaces joint_name="joint3"
-                                       command_interface="${arm_command_interface}"/>
-            <xacro:z1_joint_interfaces joint_name="joint4"
-                                       command_interface="${arm_command_interface}"/>
-            <xacro:z1_joint_interfaces joint_name="joint5"
-                                       command_interface="${arm_command_interface}"/>
-            <xacro:z1_joint_interfaces joint_name="joint6"
-                                       command_interface="${arm_command_interface}"/>
-            <xacro:if value="${use_gripper}">
-                <xacro:z1_joint_interfaces joint_name="jointGripper"
-                                           command_interface="position"/>
-            </xacro:if>
-        </ros2_control>
+    <xacro:macro name="z1_ros2_control"
+                 params="use_gripper hardware_plugin
+                         ctrl_ip ctrl_port own_port activate_fsm_sequence
+                         disconnect_timeout_ms:='200' temperature_limit:='80'">
+        <xacro:property name="is_gazebo"
+                        value="${hardware_plugin == 'gz_ros2_control/GazeboSimSystem'}"/>
+
+        <xacro:unless value="${is_gazebo}">
+            <!--
+              Real arm, via the official z1_ctrl process on the same machine.
+
+              rw_rate="500" is the transport rate, not the control rate: z1_ctrl's
+              ARMSDK loop runs at dt = 0.002 s and treats a cycle without an
+              incoming SendCmd as a timeout, so the client has to keep up at
+              500 Hz. controller_manager's own update_rate stays 250 to match the
+              arm's servo loop.
+
+              is_async + scheduling_policy="detached" makes ros2_control run this
+              component's read()/write() on its own worker thread at rw_rate,
+              which is where the UDP send/recv happens. That keeps the socket
+              syscalls off the controller_manager thread and avoids the official
+              ROS 1 driver's mistake of making the whole process SCHED_FIFO.
+            -->
+            <ros2_control name="z1" type="system" rw_rate="500" is_async="true">
+                <hardware>
+                    <plugin>${hardware_plugin}</plugin>
+                    <param name="ctrl_ip">${ctrl_ip}</param>
+                    <param name="ctrl_port">${ctrl_port}</param>
+                    <param name="own_port">${own_port}</param>
+                    <param name="activate_fsm_sequence">${activate_fsm_sequence}</param>
+                    <param name="disconnect_timeout_ms">${disconnect_timeout_ms}</param>
+                    <param name="temperature_limit">${temperature_limit}</param>
+                </hardware>
+                <properties>
+                    <async scheduling_policy="detached"/>
+                </properties>
+                <xacro:z1_ros2_control_joints use_gripper="${use_gripper}"
+                                             command_interface="position"/>
+            </ros2_control>
+        </xacro:unless>
+
+        <xacro:if value="${is_gazebo}">
+            <ros2_control name="z1" type="system">
+                <hardware>
+                    <plugin>${hardware_plugin}</plugin>
+                </hardware>
+                <xacro:z1_ros2_control_joints use_gripper="${use_gripper}"
+                                             command_interface="effort"/>
+            </ros2_control>
+        </xacro:if>
     </xacro:macro>
 
 </robot>

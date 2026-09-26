@@ -13,6 +13,19 @@
     use_world_link    (bool, true)  : add a "world" link and fix the arm base to it
     controllers_file  (string)      : controller_manager parameter file used by the
                                       gz_ros2_control plugin (Gazebo backend only)
+
+  xacro args for the real-arm backend (`hardware_plugin` != GazeboSimSystem);
+  they become <param> entries of the <hardware> block:
+
+    ctrl_ip                  (string) : z1_ctrl's host, loopback by default
+    ctrl_port                (int)    : the port z1_ctrl binds (8071)
+    own_port                 (int)    : the port we bind (8072)
+    activate_fsm_sequence    (string) : comma-separated FSM states to request on
+                                        activation ("JOINTCTRL")
+    disconnect_timeout_ms    (int)    : silence from z1_ctrl that counts as a
+                                        hardware error (200)
+    temperature_limit        (int)    : motor over-temperature limit in Celsius,
+                                        matching z1_controller's own 80 (80)
 -->
 <robot name="z1" xmlns:xacro="http://www.ros.org/wiki/xacro">
 
@@ -22,6 +35,13 @@
     <xacro:arg name="use_world_link" default="true"/>
     <xacro:arg name="controllers_file"
                default="$(find z1_bringup)/config/z1_controllers.yaml"/>
+
+    <xacro:arg name="ctrl_ip" default="127.0.0.1"/>
+    <xacro:arg name="ctrl_port" default="8071"/>
+    <xacro:arg name="own_port" default="8072"/>
+    <xacro:arg name="activate_fsm_sequence" default="JOINTCTRL"/>
+    <xacro:arg name="disconnect_timeout_ms" default="200"/>
+    <xacro:arg name="temperature_limit" default="80"/>
 
     <xacro:include filename="$(find z1_description)/urdf/const.xacro"/>
     <xacro:include filename="$(find z1_description)/urdf/z1_body.xacro"/>
@@ -42,7 +62,13 @@
     <xacro:z1_body use_gripper="$(arg use_gripper)"/>
 
     <xacro:z1_ros2_control use_gripper="$(arg use_gripper)"
-                           hardware_plugin="$(arg hardware_plugin)"/>
+                           hardware_plugin="$(arg hardware_plugin)"
+                           ctrl_ip="$(arg ctrl_ip)"
+                           ctrl_port="$(arg ctrl_port)"
+                           own_port="$(arg own_port)"
+                           activate_fsm_sequence="$(arg activate_fsm_sequence)"
+                           disconnect_timeout_ms="$(arg disconnect_timeout_ms)"
+                           temperature_limit="$(arg temperature_limit)"/>
     <xacro:z1_gz_ros2_control hardware_plugin="$(arg hardware_plugin)"
                               controllers_file="$(arg controllers_file)"/>
 
