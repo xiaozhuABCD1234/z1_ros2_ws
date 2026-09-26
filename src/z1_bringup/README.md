@@ -59,8 +59,9 @@ ros2 launch z1_bringup control.launch.py use_gripper:=false
 
 * `controller_manager.update_rate = 250 Hz`，即官方 `z1_controller` 的循环频率
   （`CtrlComponents::dt = 1/250 s`）。它**同时也是真机路径的 UDP 传输率**：
-  ros2_control 4.48 不认 URDF 里的 `rw_rate`，异步硬件就是按这个值跑的
-  （实测见 [`../z1_ros2_control/README.md`](../z1_ros2_control/README.md)）。
+  ros2_control 4.48 不认 URDF 里的 `rw_rate`（已从 URDF 删掉），异步硬件就是按这个值
+  跑的。250 与 500 两种速率都实测可用，取舍见
+  [`../z1_ros2_control/README.md`](../z1_ros2_control/README.md)。
 * `joint_trajectory_controller`：逐关节的轨迹/目标容差。
 * `gripper_controller`（`position_controllers/GripperActionController`）作用于
   `jointGripper`，仅在 `use_gripper:=true` 时启动（夹爪在所有后端都保持 position 接口）。
@@ -108,7 +109,8 @@ gz 伺服的增益位于 `z1_description/urdf/z1_gazebo.xacro`。
   （机械臂各 link 使用圆柱基元，不受影响）。
 * 力矩律的 i = 0，所以有重力静差（实测 0.001–0.021 rad）——这是官方行为的原样复现；
   容差留了 0.05 rad 的余量。
-* 真机已跑通到小幅动作（激活、保持、轨迹、回位、FSM 服务），实测数据与**尚未验证**
+* 真机已跑通：激活保持、轨迹、单关节点动（`z1_ros2_control/scripts/z1_jog.py`）、
+  `BACKTOSTART`、FSM 服务、以及 `JOINTCTRL` 的陈旧参考位姿保护。实测数据与**尚未验证**
   的部分列在 [`../z1_ros2_control/README.md`](../z1_ros2_control/README.md)。
 * 已移除 mock 硬件后端（`mock_components/GenericSystem`）：不走 Gazebo、又没接真机时，
   可用 `z1_ros2_control/scripts/z1_ctrl_mock.py` 充当 `z1_ctrl` 来验证控制器栈

@@ -1,7 +1,8 @@
 # z1_ros2_ws — Unitree Z1 的 ROS 2（Jazzy）工作空间
 
 Unitree Z1 机械臂的 ROS 2 移植：URDF、Gazebo Sim、ros2_control 和 MoveIt 2 均已跑通，
-真机（经官方 `z1_controller`）也已跑通到一个受控的小幅动作。
+真机（经官方 `z1_controller`）也已跑通：激活保持、单关节点动、`BACKTOSTART`、FSM 服务、
+陈旧参考位姿保护都已实测。
 
 参数、接口、设计原因和已知限制都写在**各包自己的 README** 里，本文件只做入口。
 真机的细节（依赖、启动顺序、实机实测数据、还没验证的部分）在
@@ -113,9 +114,11 @@ ros2 topic pub --once /joint1/cmd_pos std_msgs/msg/Float64 "{data: 0.6}"
    （`AsyncComponentThread` 里显式判 lifecycle 状态）。把"等第一帧 RecvState 再发
    `SendCmd`"的握手放进 `read()` 就是死锁——激活永远超时。I/O 必须收进一个
    `pump_once()`，由生命周期回调在激活期间自己驱动。
-9. URDF 里的 `rw_rate="500"` **不生效**：异步工作线程按 controller_manager 的
-   `update_rate` 跑。实机实测 `read()` 为 250 Hz，`z1_ctrl` 接受（它进入 joint space
-   control 并保持），所以两者故意保持解耦。
+9. URDF 里的 `rw_rate` **根本不生效**：异步硬件组件的节拍由 controller_manager 的
+   `update_rate` 决定（实测：`update_rate` 250 → `read()` 250 Hz，500 → 500 Hz，两次
+   URDF 都写着 500）。既然属性是死参数就删掉，让速率只在一处定义；两个速率都实测
+   可用（无 overrun、z1_ctrl 无漏帧告警），当前选 250 Hz。组件会在运行时把实测速率
+   打进日志，不靠配置推断。
 10. 真机六个关节常驻 `error=0x40`，而 vendored 头里该位注释是 "nothing"——
     `kErrorMask` 排除它是对的；若当地真故障，真机一帧都用不了。
 11. **joint2 是双电机关节**（每个 `JointState` 有两组 `Motor_State`），其余只有第一组；

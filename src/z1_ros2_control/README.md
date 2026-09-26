@@ -93,6 +93,16 @@ ros2 service call /z1/set_fsm_state z1_ros2_control/srv/SetFSMState "{state: PAS
 
 只暴露位置命令接口是刻意的：`z1_ctrl` 的关节伺服律是固定的，送增益或力矩没有意义。
 
+另外有一个 bring-up 用的小工具（不属于控制器栈）：
+
+```bash
+ros2 run z1_ros2_control z1_jog.py 1 --delta 0.05 --dry-run   # 只打印计划
+ros2 run z1_ros2_control z1_jog.py 1 --delta 0.05            # 动 joint1 一个关节
+```
+
+它把“只动一个关节”这件容易做错的事做对：单点轨迹的 `positions` 是绝对目标，只给一个
+关节会被理解成“其余关节去 0”。详见[实机验证结果](#单点轨迹是绝对位置)。
+
 ## 参数（URDF `<hardware><param>`）
 
 `z1_bringup/launch/control.launch.py` 的同名 launch 参数会传到这些 `<param>`，
@@ -153,19 +163,29 @@ if (component->get_lifecycle_state().id() == lifecycle_msgs::msg::State::PRIMARY
 
 ### 传输率
 
-`rw_rate="500"` 是设计目标（`z1_ctrl` 的 `ARMSDK` 循环 `dt = 0.002 s`），但
-**ros2_control 4.48 不认它**：异步工作线程是按 controller_manager 的 `update_rate`
-跑的。实机实测：
+组件设计目标是 500 Hz（`z1_ctrl` 的 `ARMSDK` 循环 `dt = 0.002 s`，一拍一帧），
+但**它不能自己选速率**：ros2_control 4.48 对异步硬件组件用 controller_manager 的
+`update_rate` 来定节拍，完全忽略 URDF 的 `rw_rate` 属性。两个方向都实测过：
+
+| `update_rate` | URDF `rw_rate` | `read()` 实测 | z1_ctrl 进入 JOINTCTRL | 漏帧告警 |
+|---|---|---|---|---|
+| 250 | 500 | **250 Hz** | 是，稳定保持 | 0 |
+| 500 | 500 | **500 Hz** | 是，稳定保持 | 0 |
+
+所以 URDF 里的 `rw_rate` 已**删掉**（留着就是一个错误的事实来源），速率只在
+`z1_bringup/config/z1_controllers.yaml` 的 `update_rate` 里定一处。当前用 **250 Hz**：
+500 Hz 的好处只是把指令延迟从 ≤4 ms 再压到 ≤2 ms（关节是绝对位置指令、有零阶保持，
+对稳定无影响），代价是控制器、`joint_state_broadcaster` 和 DDS 的负载翻倍。想换回
+500 只需改那个数，或者不改工作空间、用
+`ros2 launch z1_bringup control.launch.py controllers_file:=<你的 yaml>`（`update_rate: 500`
+的副本）验证。
+
+`read()` 会在速率首次测出、以及偏离上次报告值 ±20% 时打印实测值：
 
 ```
-[controller_manager.hardware_component.system.z1]: read() is being called at 250 Hz
-                                                   (rw_rate in the URDF says 250).
+read() is running at 250 Hz - that is the SendCmd rate z1_ctrl sees. ros2_control
+paced this component with the controller_manager's update_rate (250 Hz).
 ```
-
-`z1_ctrl` 接受 250 Hz（它进入 joint space control 并稳定保持），所以两者保持解耦；
-`read()` 会在速率首次测出、以及偏离上次报告值 ±20% 时打印实测值。想让它严格 500 Hz，
-把 `z1_bringup/config/z1_controllers.yaml` 的 `controller_manager.update_rate` 改成
-500（代价是控制器也按 500 Hz 更新）。
 
 ## FSM
 
@@ -189,6 +209,29 @@ if (component->get_lifecycle_state().id() == lifecycle_msgs::msg::State::PRIMARY
 * 已经在目标状态时服务返回成功但**什么也不做**，并在 `message` 里说明——`z1_ctrl` 的
   `checkChange()` 不会重入当前状态，所以 `TOSTATE` → 另一个 `TOSTATE` 的新 label 要先
   离开该状态（例如先切 `JOINTCTRL`）才生效。
+
+### `JOINTCTRL` 有一道陈旧参考位姿的保护
+
+进 `JOINTCTRL` 后 `z1_ctrl` 跟踪的是我们发的 `jointCmd`，源头是 `command_position_`
+——也就是控制器最后写进去的值。如果机械臂在那之后曾经失力（`PASSIVE`）、被手引导过
+（`TEACH`）或被标定过，这个参考就过期了，而**只有 `on_activate()` 会把它重新锁成实测
+位姿**。所以服务在请求 `JOINTCTRL` 前先泵一拍刷新实测值，若命令位姿与实测差得超过
+0.05 rad（就是轨迹控制器的 goal 容差）就拒绝：
+
+```
+cannot enter JOINTCTRL: the commanded position is 0.082 rad away from where the arm
+actually is (joint3), so entering it would be a step input. ... cycle the hardware
+component instead: ros2 control set_hardware_component_state z1 inactive, then ... active.
+```
+
+这条在实机上验证过（`BACKTOSTART` 把机械臂开走后请求 `JOINTCTRL` 被拒，
+inactive→active 后恢复正常）。
+
+### 报告的状态不等于机械臂已经停住
+
+`BACKTOSTART` 内部会切到 joint space 子状态来跟踪自己的轨迹，所以这段期间
+`RecvState.state` 会在 `BACKTOSTART` 和 `JOINTCTRL` 之间跳。实测两种都碰到过，因此
+`get_fsm_state` 读到 `JOINTCTRL` **不能**当作“机械臂已停住、可以接受位置指令”的证据。
 
 ### label 取自 z1_ctrl 的 CSV
 
@@ -237,23 +280,36 @@ label 从 service 线程交给 I/O 路径用的是 epoch 校验的双缓冲（`l
 | 双电机关节 | `joint2` 报两组 `Motor_State`（另一组温度 35 ℃、`error=0x40`），其余只有第一组 |
 | 激活 | `active: z1_ctrl reports JOINTCTRL, commanding the measured pose`，`z1_ctrl` 打印 `Switched from passive to joint space control` |
 | 角度一致性 | `z1_ctrl` 自己的 `joint space q` 与 `/joint_states` 一致（-0.00913 -0.00092 0.08303 -0.07593 0.02260 -0.03599） |
-| 传输率 | `read()` 实测 250 Hz（`rw_rate` 被框架覆盖成 CM 的 `update_rate`） |
+| 传输率 | `read()` 实测 250 Hz（`update_rate` 250），改成 500 时实测 500 Hz；两种都无 overrun、无漏帧告警 |
 | 轨迹 | 单点轨迹 `joint1 → +0.05 rad`：`Goal successfully reached!`，实测到位 +0.04794 |
-| 回位 | 回原姿态同样 `Goal successfully reached!` |
+| 点动工具 | `z1_jog.py 1 --delta 0.05`：计划打印 → 发送 → `Goal successfully reached!`，joint1 `-0.0061 → +0.0423`（差 0.0016）；反向回位差 0.0009 |
+| `BACKTOSTART` | `success=True`，`z1_ctrl` 打印 `[State] Reached Goal State: startFlat`，终态 (-0.0018, 0.0007, -0.0048, -0.0728, 0.0032, -0.0013) ≈ CSV 的 `startFlat` |
+| `JOINTCTRL` 保护 | `BACKTOSTART` 后请求 `JOINTCTRL` 被拒，报 0.082 rad（joint3）并指向 inactive→active；inactive→active 后恢复正常进入 |
+| `JOINTCTRL` 幂等 | 已跟踪时再请求 → `success=True, message='z1_ctrl already reports JOINTCTRL; nothing was requested'` |
+| 启动干净性 | 干净的启动下 spawner/CM 报错 0 条 |
 | FSM 服务 | `set_fsm_state PASSIVE` → `success=True, message='PASSIVE acknowledged by z1_ctrl'` |
 | 故障上报 | 全程无电机/温度/链路故障 |
 
-**尚未在实机上验证**：`BACKTOSTART`、`CALIBRATION`、`TEACH`/`TEACHREPEAT`、
-`TOSTATE`/`SAVESTATE` 的真实动作；进程被杀后 `z1_ctrl` 自动回 PASSIVE 的时延；
-夹爪（本机没有）。
+**尚未在实机上验证**：`CALIBRATION`、`TEACH`/`TEACHREPEAT`、`TOSTATE`/`SAVESTATE`
+的真实动作（`TOSTATE` 至少可预期与 `BACKTOSTART` 同路）；进程被杀后 `z1_ctrl` 自动回
+PASSIVE 的时延；夹爪（本机没有）；500 Hz 传输率只在轻载下测过（没同时跑 MoveIt/RViz）。
 
 ### 单点轨迹是绝对位置
 
-上面那次"单关节"验证实际上动了 6 个关节：`joint_trajectory_controller` 的单点轨迹里
+第一次“单关节”验证实际上动了 6 个关节：`joint_trajectory_controller` 的单点轨迹里
 `positions` 是**每个列出关节的绝对目标**，没被轨迹点覆盖的关节会被拉到该点里的值。
 只给了 `[0.05, 0, 0, 0, 0, 0]`，于是 joint3/4/5/6 也从 (0.080, -0.076, 0.023, -0.036)
 被拉到 ~0。幅度都在 0.2 rad 以内所以无害，但**要动一个关节就必须显式写出其余关节的
-当前位置**（或用 MoveIt 规划）。
+当前位置**。`scripts/z1_jog.py` 就是为这个写的：
+
+```bash
+ros2 run z1_ros2_control z1_jog.py 3 --delta -0.05 --dry-run   # 先看计划
+ros2 run z1_ros2_control z1_jog.py 3 --delta -0.05            # 再动
+```
+
+它先读 `/joint_states` 拿到完整实测位姿，只改目标关节、其余关节显式保持当前值；默认
+拒绝超过 0.2 rad 的位移和超过 0.2 rad/s 的速度（`--force` 才能放宽），并会报告实际
+到位的误差。定位是 bring-up/信号链排查，不是干活——干活用 MoveIt。
 
 ## 无机械臂时
 
@@ -271,11 +327,25 @@ ros2 run z1_ros2_control z1_ctrl_mock.py --gripper --drop-rate 0.05
 
 ## 已知问题
 
-* 启动日志里的三条噪声都无害：
+* 启动日志里的两条噪声是无害的：
   `AsyncFunctionHandler is configured with DETACHED scheduling policy`、
-  `ResourceManager has already loaded a urdf`（`/robot_description` 被投递了两次）、
-  以及偶发的 `spawner_joint_state_broadcaster ... can not be configured from 'active' state`
-  （`joint_state_broadcaster` 最终是 active 的）。
+  `ResourceManager has already loaded a urdf`（`/robot_description` 被投递了两次）。
+* **启动和停止后都查一下残留进程**。如果同一台机器上活着两个 `ros2_control_node`，
+  它们节点同名、共享 `/controller_manager` 服务，spawner 的请求会落到其中一个，于是
+  出现 `Controller 'joint_state_broadcaster' can not be configured from 'active' state`
+  或 `Failed to acquire lock in 20 seconds`，然后 spawner 直接退出（它没有重试）。
+  干净的启动里这两条一次都不会出现。以脚本方式 `kill -INT <launch 的 pid>` 停止时，
+  `robot_state_publisher` 可能被留下（它不占 8071/8072，危害只是继续发 `/joint_states`；
+  从终端 Ctrl-C 不会这样）。检查：
+
+  ```bash
+  ss -lunp | grep -E '8071|8072'        # 应该是空的
+  ps -ef | grep -E 'ros2_control_node|z1_ctrl|robot_state_publisher'
+  ```
+
+  关闭顺序也有讲究：先让 launch 及其子进程退完，再停 `z1_ctrl`。如果在
+  `ros2_control_node` 还活着时就杀掉 `z1_ctrl`，组件会正确地报 ECONNREFUSED，
+  controller_manager 随之停掉控制器并打出一串 mode-switch 失败——那是正常上报，不是缺陷。
 * 没有 RT 优先级：日志会提示
   `Could not enable FIFO RT scheduling policy`。需要的话按 ros2_control 文档配
   `limits.conf`/`rtprio`。
