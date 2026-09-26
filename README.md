@@ -1,9 +1,11 @@
 # z1_ros2_ws — Unitree Z1 的 ROS 2（Jazzy）工作空间
 
-Unitree Z1 机械臂的 ROS 2 移植：URDF、Gazebo Sim、ros2_control 和 MoveIt 2 均已跑通。
-剩余部分是硬件接口，用于通过官方的 `z1_controller` 与真机通信。
+Unitree Z1 机械臂的 ROS 2 移植：URDF、Gazebo Sim、ros2_control 和 MoveIt 2 均已跑通，
+真机（经官方 `z1_controller`）也已跑通到一个受控的小幅动作。
 
 参数、接口、设计原因和已知限制都写在**各包自己的 README** 里，本文件只做入口。
+真机的细节（依赖、启动顺序、实机实测数据、还没验证的部分）在
+[`z1_ros2_control/README.md`](src/z1_ros2_control/README.md)。
 
 ## 功能包
 
@@ -13,7 +15,7 @@ Unitree Z1 机械臂的 ROS 2 移植：URDF、Gazebo Sim、ros2_control 和 Move
 | [`z1_bringup`](src/z1_bringup) | ✅ | ros2_control / Gazebo 启动、控制器配置 |
 | [`z1_moveit_config`](src/z1_moveit_config) | ✅ | SRDF、运动学、关节限位、MoveIt 2 演示 |
 | [`z1_controllers`](src/z1_controllers) | ✅ | 官方力矩律控制器 `Z1JointTrajectoryController`（τ = Kp·e + Kd·ė，限幅），给 Gazebo 的 effort 接口用 |
-| `z1_ros2_control` | ⏳ 下一步 | 对接 `z1_controller` 的 `hardware_interface::SystemInterface` |
+| [`z1_ros2_control`](src/z1_ros2_control) | ✅ | 真机硬件接口（官方 `z1_controller` 的 UDP 客户端）+ FSM 服务（`~/set_fsm_state`、`~/get_fsm_state`） |
 
 ## 编译
 
@@ -31,7 +33,7 @@ source install/setup.bash
 | 用途 | 命令 |
 |---|---|
 | 仅 URDF（RViz + 关节滑块） | `ros2 launch z1_description display.launch.py` |
-| ros2_control，真机（`z1_ros2_control/Z1System`） | `ros2 launch z1_bringup control.launch.py` |
+| ros2_control，真机（`z1_ros2_control/Z1System`） | 先在 `~/Projects/z1_controller/build` 起 `./z1_ctrl`，再 `ros2 launch z1_bringup control.launch.py` |
 | Gazebo Sim（gz 位置伺服） | `ros2 launch z1_bringup gazebo.launch.py` |
 | Gazebo Sim + ros2_control | `ros2 launch z1_bringup gazebo_ros2_control.launch.py` |
 | MoveIt 2 演示（仿真 + RViz） | `ros2 launch z1_moveit_config demo.launch.py` |
@@ -74,7 +76,7 @@ ros2 topic pub --once /joint1/cmd_pos std_msgs/msg/Float64 "{data: 0.6}"
 ## 设计要点
 
 * **一份 URDF，两种 ros2_control 后端**：`hardware_plugin:=` 选
-  `z1_ros2_control/Z1System`（真机，默认，下一步）或 `gz_ros2_control/GazeboSimSystem`；
+  `z1_ros2_control/Z1System`（真机，默认）或 `gz_ros2_control/GazeboSimSystem`；
   控制器集合与 MoveIt 配置完全一致。
 * **Gazebo 后端用 `effort` 接口，其余用 `position`**（`z1_ros2_control.xacro` 自动切）：
   gz_ros2_control 的位置接口只有单一 P 增益、没有 D，会跟关节摩擦形成持续抖动。
@@ -84,6 +86,8 @@ ros2 topic pub --once /joint1/cmd_pos std_msgs/msg/Float64 "{data: 0.6}"
   Gazebo、MoveIt 的启动文件都组合它；两条 Gazebo 路径（gz 伺服 + bridge、
   gz_ros2_control）相互独立，不能同时运行。
 * **真机上关节级伺服律留在 `z1_controller` 内部**，ros2_control 只下发位置指令。
+  真机路径需要先手动起官方 `z1_ctrl` 进程（顺序和要求见
+  [`z1_ros2_control/README.md`](src/z1_ros2_control/README.md)）。
 
 ## 踩坑结论
 
@@ -101,6 +105,26 @@ ros2 topic pub --once /joint1/cmd_pos std_msgs/msg/Float64 "{data: 0.6}"
    下限 / joint3 上限上，控制器激活后先限速滑到 SRDF 的 `forward` 位姿再等规划。
 7. 官方命名位姿不能照抄：`home`/`startFlat` 压在 joint2 下限上，`stow` 的 joint4 超出官方
    ±87° 限位 0.052 rad，只有 `forward` 完整落在限位内——停靠位姿因此用官方 `forward`。
+
+真机调试新出的几条（细节与实测数据见
+[`z1_ros2_control/README.md`](src/z1_ros2_control/README.md)）：
+
+8. **ros2_control 只在组件 ACTIVE 之后才调 `read()`/`write()`**
+   （`AsyncComponentThread` 里显式判 lifecycle 状态）。把"等第一帧 RecvState 再发
+   `SendCmd`"的握手放进 `read()` 就是死锁——激活永远超时。I/O 必须收进一个
+   `pump_once()`，由生命周期回调在激活期间自己驱动。
+9. URDF 里的 `rw_rate="500"` **不生效**：异步工作线程按 controller_manager 的
+   `update_rate` 跑。实机实测 `read()` 为 250 Hz，`z1_ctrl` 接受（它进入 joint space
+   control 并保持），所以两者故意保持解耦。
+10. 真机六个关节常驻 `error=0x40`，而 vendored 头里该位注释是 "nothing"——
+    `kErrorMask` 排除它是对的；若当地真故障，真机一帧都用不了。
+11. **joint2 是双电机关节**（每个 `JointState` 有两组 `Motor_State`），其余只有第一组；
+    且无夹爪时第 7 个电机槽不能参与故障判定（否则健康 6 轴臂每周期 ERROR）。
+12. `joint_trajectory_controller` 的单点轨迹里 `positions` 是**绝对**目标，不是增量：
+    想动一个关节，必须把其余关节的当前位置一并写进轨迹点。
+13. mock 写好了不等于能跑：`z1_ctrl_mock.py` 有两个致命 bug（`finally:` 里的 `return`
+    吞掉所有异常；`build_reply()` 少打包 3 个字段），使它在"跑通"的样子下一包都发不
+    出去。异常路径与返回值核对必须在接真机前做完。
 
 ## 来源 / 许可证
 

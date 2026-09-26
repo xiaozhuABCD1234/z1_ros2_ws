@@ -65,17 +65,24 @@
             <!--
               Real arm, via the official z1_ctrl process on the same machine.
 
-              rw_rate="500" is the transport rate, not the control rate: z1_ctrl's
-              ARMSDK loop runs at dt = 0.002 s and treats a cycle without an
-              incoming SendCmd as a timeout, so the client has to keep up at
-              500 Hz. controller_manager's own update_rate stays 250 to match the
-              arm's servo loop.
+              rw_rate="500" is what this component is designed for: z1_ctrl's
+              ARMSDK loop runs at dt = 0.002 s, so 500 Hz is the rate that feeds
+              it one SendCmd per tick. Be aware that ros2_control 4.48 (Jazzy)
+              does NOT honour it - the async worker is paced by the
+              controller_manager's update_rate instead (250 Hz here), and
+              on_init/report_read_rate() log the value that actually took effect.
+              Measured on a real Z1: read() runs at 250 Hz and z1_ctrl accepts it
+              (it enters JOINTCTRL and holds), so the two rates are left decoupled
+              like this. Raise controller_manager's update_rate to 500 to get a
+              500 Hz transport too.
 
               is_async + scheduling_policy="detached" makes ros2_control run this
-              component's read()/write() on its own worker thread at rw_rate,
-              which is where the UDP send/recv happens. That keeps the socket
-              syscalls off the controller_manager thread and avoids the official
-              ROS 1 driver's mistake of making the whole process SCHED_FIFO.
+              component's read()/write() on its own worker thread, which is where
+              the UDP send/recv happens - but only while the component is ACTIVE,
+              so on_activate() pumps the socket itself (see Z1System::pump_once).
+              That keeps the socket syscalls off the controller_manager thread and
+              avoids the official ROS 1 driver's mistake of making the whole
+              process SCHED_FIFO.
             -->
             <ros2_control name="z1" type="system" rw_rate="500" is_async="true">
                 <hardware>

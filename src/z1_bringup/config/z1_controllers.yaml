@@ -1,6 +1,11 @@
 # controller_manager configuration for the Z1 arm.
 #
-# update_rate matches z1_controller: CtrlComponents::dt = 1/250 s.
+# update_rate matches z1_controller: CtrlComponents::dt = 1/250 s. It is also what
+# paces the real-arm hardware component: ros2_control 4.48 does not honour the
+# URDF's rw_rate for async components, so this number *is* the UDP transport rate.
+# 250 Hz was measured working against a real Z1 (z1_ctrl enters JOINTCTRL and
+# holds); raise it to 500 if you want one SendCmd per ARMSDK tick - see
+# z1_ros2_control/README.md.
 # The gripper controller is only spawned when use_gripper:=true.
 
 controller_manager:

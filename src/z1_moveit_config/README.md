@@ -29,8 +29,9 @@ ros2 launch z1_moveit_config demo.launch.py
 # 不带 RViz（无界面跑规划/执行）
 ros2 launch z1_moveit_config demo.launch.py use_rviz:=false
 
-# 真机（z1_ros2_control/Z1System，待实现）+ RViz
-ros2 launch z1_moveit_config demo.launch.py use_gazebo:=false
+# 真机（z1_ros2_control/Z1System）+ RViz；需要先在 ~/Projects/z1_controller/build
+# 里起 ./z1_ctrl，且启动时机械臂会先失力到 PASSIVE
+ros2 launch z1_moveit_config demo.launch.py use_gazebo:=false use_gripper:=false
 
 # 无末端执行器（本机情况）：URDF、SRDF、控制器映射一起切成 6 轴
 ros2 launch z1_moveit_config demo.launch.py use_gripper:=false use_gazebo:=true

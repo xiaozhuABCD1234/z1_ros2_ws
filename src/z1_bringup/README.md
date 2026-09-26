@@ -26,10 +26,23 @@ Z1 机械臂的启动文件与控制器配置。
 
 | 插件 | 含义 |
 |---|---|
-| `z1_ros2_control/Z1System` | 经 `z1_controller` 连接真机（待实现，**默认**） |
+| `z1_ros2_control/Z1System` | 经 `z1_controller` 连接真机（**默认**；需先手动起 `z1_ctrl`，见 [`../z1_ros2_control/README.md`](../z1_ros2_control/README.md)） |
 | `gz_ros2_control/GazeboSimSystem` | Gazebo Sim 物理，供 `gazebo_ros2_control.launch.py` 使用 |
 
 两种情况下控制器、接口和 MoveIt 配置完全相同。
+
+### 真机的启动顺序
+
+```bash
+# 终端 1：官方控制器必须先就绪，它一启动机械臂就失去支撑（PASSIVE）
+cd ~/Projects/z1_controller/build && ./z1_ctrl
+# 终端 2
+ros2 launch z1_bringup control.launch.py use_gripper:=false
+```
+
+顺序颠倒是硬错误：本组件在激活前必须先收到一帧 `RecvState`，而 ros2_control 在硬件激活
+失败时会直接让 `ros2_control_node` `std::terminate`。MSM 服务（`/z1/set_fsm_state`、
+`/z1/get_fsm_state`）由硬件组件自己的节点提供。
 
 ## 控制器配置
 
@@ -45,7 +58,9 @@ Z1 机械臂的启动文件与控制器配置。
 共有部分：
 
 * `controller_manager.update_rate = 250 Hz`，即官方 `z1_controller` 的循环频率
-  （`CtrlComponents::dt = 1/250 s`）。
+  （`CtrlComponents::dt = 1/250 s`）。它**同时也是真机路径的 UDP 传输率**：
+  ros2_control 4.48 不认 URDF 里的 `rw_rate`，异步硬件就是按这个值跑的
+  （实测见 [`../z1_ros2_control/README.md`](../z1_ros2_control/README.md)）。
 * `joint_trajectory_controller`：逐关节的轨迹/目标容差。
 * `gripper_controller`（`position_controllers/GripperActionController`）作用于
   `jointGripper`，仅在 `use_gripper:=true` 时启动（夹爪在所有后端都保持 position 接口）。
@@ -93,6 +108,8 @@ gz 伺服的增益位于 `z1_description/urdf/z1_gazebo.xacro`。
   （机械臂各 link 使用圆柱基元，不受影响）。
 * 力矩律的 i = 0，所以有重力静差（实测 0.001–0.021 rad）——这是官方行为的原样复现；
   容差留了 0.05 rad 的余量。
-* 真机尚未验证——硬件插件目前还不存在。
+* 真机已跑通到小幅动作（激活、保持、轨迹、回位、FSM 服务），实测数据与**尚未验证**
+  的部分列在 [`../z1_ros2_control/README.md`](../z1_ros2_control/README.md)。
 * 已移除 mock 硬件后端（`mock_components/GenericSystem`）：不走 Gazebo、又没接真机时，
-  没有可加载的硬件插件（真机插件待实现），也无法只靠本仓库验证控制器栈。
+  可用 `z1_ros2_control/scripts/z1_ctrl_mock.py` 充当 `z1_ctrl` 来验证控制器栈
+  （它扮演控制器，不是扮演机械臂）。
