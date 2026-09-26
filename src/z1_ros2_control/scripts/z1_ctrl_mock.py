@@ -71,9 +71,17 @@ MOTOR_COUNT = 7
 ARM_JOINTS = 6
 GRIPPER_INDEX = 6
 
+# How many values RECV_STATE.pack() wants: two head bytes, the state, one
+# JointState per motor (4 floats plus *two* Motor_State blocks of three), then the
+# six Cartesian doubles. build_reply() checks itself against this, because getting
+# it wrong is a struct.error on the very first send - the mock then exits without
+# having sent a single datagram.
+RECV_FIELD_COUNT = 2 + 1 + MOTOR_COUNT * (4 + 2 * 3) + 6
+
 assert SEND_CMD.size == 147, SEND_CMD.size
 assert RECV_STATE.size == 208, RECV_STATE.size
 assert JOINT_CMD.size == 20, JOINT_CMD.size
+assert RECV_FIELD_COUNT == 79, RECV_FIELD_COUNT
 
 # ArmFSMState, from the vendored header.
 FSM_STATES = {
@@ -197,12 +205,24 @@ class MockZ1:
                 self.velocity[index],
                 0.0,  # acceleration, unused by the hardware interface
                 self.position[index],
-                35 & 0xFF,  # temperature, Celsius
+                # A JointState carries *two* Motor_State blocks, because a Z1 joint
+                # can be driven by two motors. This mock models one motor per joint,
+                # so the first block describes it and the second one stays zeroed.
+                # That is the faithful choice, not a shortcut: `apply_state()` only
+                # consults the second block when its temperature is non-zero, so a
+                # zeroed block can never raise a phantom fault.
+                (35 & 0xFF),  # temperature, Celsius
                 (0x01 if self.args.motor_fault == index else 0) & 0xFF,
                 CONNECTED_OK,
+                0,  # second motor: temperature
+                0,  # second motor: error
+                0,  # second motor: connected
             ])
         # Cartesian posture is not used by the hardware interface; report zeros.
         fields.extend([0.0] * 6)
+        if len(fields) != RECV_FIELD_COUNT:
+            raise AssertionError('build_reply produced {} values, RecvState needs {}'.format(
+                len(fields), RECV_FIELD_COUNT))
         return RECV_STATE.pack(*fields)
 
     # -- plant --------------------------------------------------------------
@@ -234,7 +254,8 @@ class MockZ1:
             self.joint_count, ' (with gripper)' if self.args.gripper else ' (no gripper)',
             self.args.bind_ip, self.args.bind_port, self.client[0], self.client[1],
             self.args.rate))
-        print('Waiting for SendCmd from z1_ros2_control/Z1System ...')
+        print('Sending RecvState to {}:{}; waiting for z1_ros2_control/Z1System to show up ...'
+              .format(self.client[0], self.client[1]))
 
         try:
             while True:
@@ -296,7 +317,10 @@ class MockZ1:
                 ', '.join(state_name(s) for s in sorted(self.states_seen)) or 'none'))
             if self.rx_packets > 0 and JOINTCTRL not in self.states_seen:
                 print('NOTE: the client never asked for JOINTCTRL.')
-            return 0
+        # Deliberately outside the finally block: a `return` in there would swallow
+        # whatever the loop raised, so a crash on the very first packet would look
+        # like a clean exit with status 0.
+        return 0
 
     def rx_bad_header_seen(self):
         return self.rx_bad_size or self.rx_bad_head or self.rx_bad_state
