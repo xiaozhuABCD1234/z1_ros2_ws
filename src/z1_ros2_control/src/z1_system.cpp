@@ -16,8 +16,11 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <cstdlib>
 #include <cstring>
+#include <iomanip>
+#include <sstream>
 #include <stdexcept>
 #include <string>
 #include <thread>
@@ -32,20 +35,26 @@ namespace z1_ros2_control
 
 namespace
 {
-/// Cap on datagrams consumed per read(), so a flooded socket cannot stall the
-/// 500 Hz worker thread.
+/// Cap on datagrams consumed per pump, so a flooded socket cannot stall the
+/// worker thread.
 constexpr int kMaxDrainPerCycle = 16;
+
+/// How far the commanded joint position may sit from the measured one before
+/// `set_fsm_state JOINTCTRL` refuses to enter joint control: past this, entering
+/// would be a step input rather than a resume. 0.05 rad is the same "close
+/// enough" the trajectory controller's goal tolerance uses.
+constexpr double kJointCtrlRejoinTolerance = 0.05;
 
 /// How long the lifecycle callbacks sleep between polls of the async thread.
 constexpr auto kPollInterval = std::chrono::milliseconds(2);
 
-/// The label handshake between the service callbacks and read() must stay
-/// lock-free: read() runs on the 500 Hz worker thread. On x86-64 it does, but a
+/// The label handshake between the service callbacks and the I/O path must stay
+/// lock-free: it runs on the async worker thread. On x86-64 it does, but a
 /// standard library that decided otherwise would silently put a mutex in the
 /// realtime path, so check it at build time.
 static_assert(
   std::atomic<char>::is_always_lock_free,
-  "the label handshake must not be able to take a lock on the 500 Hz thread");
+  "the label handshake must not be able to take a lock on the worker thread");
 
 int64_t steady_ns()
 {
@@ -90,7 +99,7 @@ std::string trim(const std::string & text)
 /// rewriting it would carry a *different command*, not a stale one.
 ///
 /// Skipping instead of waiting is deliberate: blocking here would put a lock in
-/// the 500 Hz path, and every caller either retries (the wait loops) or simply
+/// the I/O path, and every caller either retries (the wait loops) or simply
 /// gets the other thread's frame (read()/write()).
 class IoGuard
 {
@@ -196,18 +205,15 @@ hardware_interface::CallbackReturn Z1System::on_init(
   }
 
   RCLCPP_INFO(
-    get_logger(), "'%s': %zu arm joints%s, controller at %s:%u, own port %u, rw_rate %u Hz.",
-    info.name.c_str(), arm_joint_names_.size(),
+    get_logger(), "'%s': %zu arm joints%s, controller at %s:%u, own port %u.", info.name.c_str(),
+    arm_joint_names_.size(),
     has_gripper_ ? " + gripper" : " (no gripper; motor slot 6 is held at its measured angle)",
-    ctrl_ip_.c_str(), ctrl_port_, own_port_, info.rw_rate);
+    ctrl_ip_.c_str(), ctrl_port_, own_port_);
 
-  if (info.rw_rate == 0u) {
-    RCLCPP_WARN(
-      get_logger(),
-      "'%s': rw_rate is 0. This component must be declared with rw_rate=\"500\" - z1_ctrl's "
-      "ARMSDK loop runs at 500 Hz and treats a cycle without an incoming SendCmd as a timeout.",
-      info.name.c_str());
-  }
+  // No check on info.rw_rate: for an async component ros2_control replaces it with
+  // the controller_manager's update_rate before on_init() ever runs, so it is
+  // never the URDF's value and never 0. The rate that matters - the SendCmd rate
+  // z1_ctrl sees - is measured and logged by report_read_rate() instead.
 
   return CallbackReturn::SUCCESS;
 }
@@ -794,13 +800,15 @@ void Z1System::report_read_rate(int64_t now_ns)
 
   const double hz =
     static_cast<double>(rate_window_cycles_) * 1e9 / static_cast<double>(elapsed_ns);
-  // First measurement always, then only when the rate leaves a wide band: at
-  // 500 Hz the odd dropped cycle is normal, a halving of the rate is not.
+  // First measurement always, then only when the rate leaves a wide band: the odd
+  // dropped cycle is normal, a halving of the rate is not.
   if (rate_reference_hz_ == 0.0 || hz < rate_reference_hz_ * 0.8 ||
       hz > rate_reference_hz_ * 1.25) {
     RCLCPP_INFO(
-      get_logger(), "read() is being called at %.0f Hz (rw_rate in the URDF says %u).", hz,
-      get_hardware_info().rw_rate);
+      get_logger(),
+      "read() is running at %.0f Hz - that is the SendCmd rate z1_ctrl sees. ros2_control "
+      "paced this component with the controller_manager's update_rate (%u Hz).",
+      hz, get_hardware_info().rw_rate);
     rate_reference_hz_ = hz;
   }
 
@@ -857,11 +865,11 @@ bool Z1System::publish_label(const std::string & label, std::string & error)
   // Do not point z1_ctrl at the state before the label has been taken up: z1_ctrl
   // reads `name` when it *enters* the state, so the first frame that carries the
   // state also has to carry a correct label. pump_once() is what performs that
-  // copy, and it runs here because read() is not being called while a service
-  // callback or a lifecycle transition is in progress - no wait: the service
-  // callback runs on the controller_manager's executor, *alongside* the async
-  // worker, so this loop and read() both pump. Both are safe to run at once (see
-  // the note in the README), and this one only needs to see the epoch move.
+  // copy. While this loop runs, read() may be pumping in parallel (this callback
+  // is on the controller_manager's executor, the worker thread is separate), so
+  // both may make progress - IoGuard keeps them from assembling a frame at the
+  // same time. All we need is to see the epoch move, which happens within a cycle
+  // or two of either of them.
   const auto deadline =
     std::chrono::steady_clock::now() + std::chrono::milliseconds(fsm_timeout_ms_);
   while (std::chrono::steady_clock::now() < deadline) {
@@ -931,7 +939,7 @@ void Z1System::handle_set_fsm_state(
 {
   // The controller_manager's executor may be multithreaded, and two overlapping
   // transitions would interleave their `requested_state_` stores. read() and
-  // write() never take this lock, so the 500 Hz thread cannot be blocked by it.
+  // write() never take this lock, so the worker thread cannot be blocked by it.
   std::lock_guard<std::mutex> guard(service_mutex_);
 
   const auto reported = static_cast<UNITREE_ARM::ArmFSMState>(reported_state_.load());
@@ -977,6 +985,42 @@ void Z1System::handle_set_fsm_state(
       "the link to z1_ctrl is not armed, so no request can be delivered. Activate the hardware "
       "component first, e.g. ros2 control set_hardware_component_state z1 active";
     return;
+  }
+
+  if (state == UNITREE_ARM::ArmFSMState::JOINTCTRL) {
+    // Entering JOINTCTRL makes z1_ctrl track `valueUnion.jointCmd`, which comes
+    // straight from `command_position_` - whatever the trajectory controller last
+    // wrote. If the arm has been limp (PASSIVE), hand-guided (TEACH) or
+    // calibrated since then, that reference is stale and entering JOINTCTRL is a
+    // step input. Only on_activate() re-seeds it from the measured pose, so this
+    // refuses instead of yanking the arm and points at the lifecycle.
+    //
+    // read() only runs while the component is ACTIVE, so pump once first: while
+    // INACTIVE the state arrays would otherwise be a stale sample and the
+    // comparison below meaningless.
+    std::string pump_error;
+    pump_once(pump_error);
+
+    double worst = 0.0;
+    size_t worst_index = 0;
+    for (size_t i = 0; i < kArmJointCount; ++i) {
+      const double offset = std::abs(command_position_[i] - motor_position_[i]);
+      if (offset > worst) {
+        worst = offset;
+        worst_index = i;
+      }
+    }
+    if (worst > kJointCtrlRejoinTolerance) {
+      std::ostringstream detail;
+      detail << "cannot enter JOINTCTRL: the commanded position is " << std::fixed
+             << std::setprecision(3) << worst
+             << " rad away from where the arm actually is (joint" << (worst_index + 1)
+             << "), so entering it would be a step input. This component only re-seeds the joint "
+                "command from the measured pose during activation - cycle the hardware component "
+                "instead: ros2 control set_hardware_component_state z1 inactive, then ... active.";
+      response->message = detail.str();
+      return;
+    }
   }
 
   if (reported == state) {

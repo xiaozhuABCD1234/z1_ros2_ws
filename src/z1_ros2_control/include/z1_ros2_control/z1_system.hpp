@@ -49,9 +49,11 @@ namespace z1_ros2_control
 /// ### Threading, and why there are no locks in the I/O path
 ///
 /// The component is declared `is_async="true"` in the URDF, so ros2_control
-/// runs `read()` and `write()` on its own worker thread at `rw_rate`, each cycle
-/// calling `write()` and then `read()` **on that one thread** - but *only while
-/// the component is ACTIVE*. ros2_control's `AsyncComponentThread` gates every
+/// runs `read()` and `write()` on its own worker thread, each cycle calling
+/// `write()` and then `read()` **on that one thread** - but *only while the
+/// component is ACTIVE*, and paced by the controller_manager's `update_rate`
+/// rather than by the URDF's `rw_rate` (see below). ros2_control's
+/// `AsyncComponentThread` gates every
 /// call on the lifecycle state, which is why on_activate() has to drive the
 /// socket itself; see `pump_once()`. Consequences:
 ///
@@ -70,10 +72,13 @@ namespace z1_ros2_control
 /// The one mutex in the class, `service_mutex_`, is taken by the `set_fsm_state`
 /// callback only. read()/write() never touch it.
 ///
-/// `rw_rate` should be 500: `z1_ctrl`'s `ARMSDK` loop runs at `dt = 0.002` s and
-/// considers a cycle without an incoming `SendCmd` to be a timeout. What actually
-/// paces this component is whatever ros2_control hands to its async thread, so the
-/// measured rate is logged - see `report_read_rate()`.
+/// `rw_rate` should be 500: `z1_ctrl`'s `ARMSDK` loop runs at `dt = 0.002` s, so
+/// 500 Hz is one `SendCmd` per tick. The rate is not something this class gets to
+/// choose, though: ros2_control 4.48 paces an async component with the
+/// controller_manager's `update_rate` and ignores the URDF's `rw_rate` attribute
+/// (measured both ways - 250 -> 250 Hz, 500 -> 500 Hz, with the attribute saying
+/// 500 in both runs). `report_read_rate()` therefore logs what actually happens,
+/// and `z1_bringup/config/z1_controllers.yaml` is where the number is set.
 class Z1System : public hardware_interface::SystemInterface
 {
 public:
@@ -105,7 +110,7 @@ private:
   void assemble_frame();
 
   /// Log a fault, but only when it differs from the one already being reported,
-  /// so a 500 Hz loop cannot flood the log.
+  /// so a fast I/O loop cannot flood the log.
   void report_fault(const std::string & message);
   void clear_fault();
 
@@ -152,7 +157,7 @@ private:
   /// Report how fast ros2_control is actually calling read(), because that - not
   /// `rw_rate` in the URDF - is what z1_ctrl's 2 ms ARMSDK loop sees. Logs once
   /// when the first second is up, then only when the rate leaves a +/-20% band
-  /// around the last reported value, so a healthy 500 Hz run stays quiet.
+  /// around the last reported value, so a healthy run stays quiet.
   /// Never returns an error: a slow cycle must not drop an arm that is standing
   /// still and healthy (see the disconnect check in read()).
   void report_read_rate(int64_t now_ns);

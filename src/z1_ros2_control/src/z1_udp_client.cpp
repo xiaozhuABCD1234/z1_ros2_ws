@@ -102,7 +102,7 @@ bool Z1UdpClient::open(
     return false;
   }
 
-  // Non-blocking: read() runs inside the async worker thread at 500 Hz and must
+  // Non-blocking: pump_once() runs inside the async worker thread and must
   // never wait for the arm.
   const int flags = ::fcntl(fd_, F_GETFL, 0);
   if (flags < 0 || ::fcntl(fd_, F_SETFL, flags | O_NONBLOCK) < 0) {
