@@ -14,10 +14,11 @@
       kinematics and the collision detection, and this component only exchanges
       SendCmd/RecvState datagrams with it on 127.0.0.1.
 
-      Must be declared is_async="true". rw_rate="500" matches z1_ctrl's 2 ms
-      ARMSDK loop, but ros2_control 4.48 paces an async component at the
-      controller_manager's update_rate regardless; the rate that actually took
-      effect is logged at runtime. See the package README.
+      Must be declared is_async="true". The UDP transport rate is whatever the
+      controller_manager's update_rate is: ros2_control 4.48 paces async hardware
+      components with that value and ignores the URDF's rw_rate attribute, so there
+      is no rw_rate in the URDF. The rate that took effect is logged at runtime - see
+      the package README.
     </description>
   </class>
 </library>

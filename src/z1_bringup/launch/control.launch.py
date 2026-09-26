@@ -10,7 +10,9 @@ MoveIt launch files build on.
 
 The `ctrl_*` arguments below are only used by the real-arm backend; they are
 passed into the URDF as `<param>` entries of the `<hardware>` block, which is
-where ros2_control reads a component's configuration from.
+where ros2_control reads a component's configuration from. `controllers_file`
+selects the controller_manager parameter file, which for the real arm also sets
+the UDP transport rate (see z1_ros2_control/README.md).
 """
 
 from launch import LaunchDescription
@@ -54,7 +56,7 @@ def generate_launch_description() -> LaunchDescription:
     pkg_description = FindPackageShare("z1_description")
 
     xacro_file = PathJoinSubstitution([pkg_description, "urdf", "z1.urdf.xacro"])
-    controllers_file = PathJoinSubstitution([pkg_bringup, "config", "z1_controllers.yaml"])
+    controllers_file = LaunchConfiguration("controllers_file")
 
     use_gripper = LaunchConfiguration("use_gripper")
 
@@ -69,6 +71,16 @@ def generate_launch_description() -> LaunchDescription:
             "hardware_plugin",
             default_value="z1_ros2_control/Z1System",
             description="ros2_control hardware plugin to load",
+        ),
+        DeclareLaunchArgument(
+            "controllers_file",
+            default_value=PathJoinSubstitution(
+                [pkg_bringup, "config", "z1_controllers.yaml"]
+            ),
+            description=(
+                "controller_manager parameters. Its update_rate is also what paces the "
+                "real-arm hardware component, i.e. the SendCmd rate z1_ctrl sees"
+            ),
         ),
     ] + [
         DeclareLaunchArgument(name, default_value=default, description=description)

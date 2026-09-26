@@ -18,7 +18,7 @@
   controller (GripperActionController) on every backend.
 
   Only the real-arm block is async. `gz_ros2_control` builds its own component
-  and must not be forced onto our 500 Hz worker thread; keeping the two blocks
+  and must not be forced onto our async worker thread; keeping the two blocks
   apart also keeps the Gazebo path's URDF free of parameters it would ignore.
 -->
 <robot xmlns:xacro="http://www.ros.org/wiki/xacro">
@@ -65,16 +65,15 @@
             <!--
               Real arm, via the official z1_ctrl process on the same machine.
 
-              rw_rate="500" is what this component is designed for: z1_ctrl's
-              ARMSDK loop runs at dt = 0.002 s, so 500 Hz is the rate that feeds
-              it one SendCmd per tick. Be aware that ros2_control 4.48 (Jazzy)
-              does NOT honour it - the async worker is paced by the
-              controller_manager's update_rate instead (250 Hz here), and
-              on_init/report_read_rate() log the value that actually took effect.
-              Measured on a real Z1: read() runs at 250 Hz and z1_ctrl accepts it
-              (it enters JOINTCTRL and holds), so the two rates are left decoupled
-              like this. Raise controller_manager's update_rate to 500 to get a
-              500 Hz transport too.
+              No rw_rate attribute on purpose. This component was written for 500 Hz
+              (z1_ctrl's ARMSDK loop runs at dt = 0.002 s, so 500 Hz is one SendCmd
+              per tick), but ros2_control 4.48 ignores the attribute and paces the
+              async worker with the controller_manager's update_rate instead. That was
+              measured both ways: update_rate 250 -> read() at 250 Hz, update_rate 500
+              -> read() at 500 Hz, with the URDF saying 500 in both runs. Leaving a
+              dead attribute in the file would just be a second, wrong source of
+              truth, so the rate lives in z1_bringup/config/z1_controllers.yaml and
+              the component logs the rate it actually measured.
 
               is_async + scheduling_policy="detached" makes ros2_control run this
               component's read()/write() on its own worker thread, which is where
@@ -84,7 +83,7 @@
               avoids the official ROS 1 driver's mistake of making the whole
               process SCHED_FIFO.
             -->
-            <ros2_control name="z1" type="system" rw_rate="500" is_async="true">
+            <ros2_control name="z1" type="system" is_async="true">
                 <hardware>
                     <plugin>${hardware_plugin}</plugin>
                     <param name="ctrl_ip">${ctrl_ip}</param>
