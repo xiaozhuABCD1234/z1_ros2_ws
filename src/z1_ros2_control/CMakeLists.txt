@@ -52,7 +52,7 @@ install(TARGETS ${PROJECT_NAME}_plugin
   RUNTIME DESTINATION bin)
 install(DIRECTORY include/ DESTINATION include)
 install(DIRECTORY thirdparty/ DESTINATION thirdparty)
-install(PROGRAMS scripts/z1_ctrl_mock.py
+install(PROGRAMS scripts/z1_ctrl_mock.py scripts/z1_jog.py
   DESTINATION lib/${PROJECT_NAME})
 
 # No ament_export_libraries(): pluginlib loads the plugin through the description
