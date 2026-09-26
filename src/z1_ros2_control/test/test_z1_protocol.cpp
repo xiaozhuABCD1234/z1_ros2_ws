@@ -164,6 +164,74 @@ TEST(Z1Protocol, FsmStateNameRoundTrip)
   EXPECT_EQ(z1_ros2_control::fsmStateName(UNITREE_ARM::ArmFSMState::LOWCMD), std::string("LOWCMD"));
 }
 
+/// LOWCMD hands raw motor commands to the arm and bypasses z1_ctrl's joint servo
+/// law, so nothing in this workspace may be able to ask for it - not a parameter,
+/// not a service request.
+TEST(Z1Protocol, LowCmdCannotBeNamed)
+{
+  UNITREE_ARM::ArmFSMState parsed{};
+  EXPECT_FALSE(z1_ros2_control::parseFsmStateName("LOWCMD", parsed));
+  EXPECT_FALSE(z1_ros2_control::parseFsmStateName("lowcmd", parsed));
+  EXPECT_FALSE(z1_ros2_control::isServiceFsmState(UNITREE_ARM::ArmFSMState::LOWCMD));
+  EXPECT_FALSE(z1_ros2_control::isSafeFsmState(UNITREE_ARM::ArmFSMState::LOWCMD));
+}
+
+/// The states are split by what they read out of `SendCmd::valueUnion`:
+/// the safe ones ignore it, the labelled ones read `name`, and the rest need a
+/// payload this component never writes. See z1_protocol.hpp and the package
+/// README for the disassembly each of these claims comes from.
+TEST(Z1Protocol, FsmStateClassification)
+{
+  using UNITREE_ARM::ArmFSMState;
+
+  for (const auto state : {ArmFSMState::PASSIVE, ArmFSMState::JOINTCTRL, ArmFSMState::BACKTOSTART,
+                           ArmFSMState::CALIBRATION}) {
+    EXPECT_TRUE(z1_ros2_control::isSafeFsmState(state)) << z1_ros2_control::fsmStateName(state);
+    EXPECT_TRUE(z1_ros2_control::isServiceFsmState(state))
+      << z1_ros2_control::fsmStateName(state);
+    EXPECT_FALSE(z1_ros2_control::fsmStateTakesLabel(state))
+      << z1_ros2_control::fsmStateName(state);
+  }
+
+  // Parsable and offered by the service, but not usable in activate_fsm_sequence:
+  // there would be nothing to put in the label yet.
+  for (const auto state : {ArmFSMState::TOSTATE, ArmFSMState::SAVESTATE, ArmFSMState::TEACH,
+                           ArmFSMState::TEACHREPEAT}) {
+    EXPECT_TRUE(z1_ros2_control::fsmStateTakesLabel(state))
+      << z1_ros2_control::fsmStateName(state);
+    EXPECT_TRUE(z1_ros2_control::isServiceFsmState(state))
+      << z1_ros2_control::fsmStateName(state);
+    EXPECT_FALSE(z1_ros2_control::isSafeFsmState(state))
+      << z1_ros2_control::fsmStateName(state);
+  }
+
+  // Reachable by neither route: they read a posture or a trajectory.
+  for (const auto state : {ArmFSMState::CARTESIAN, ArmFSMState::MOVEJ, ArmFSMState::MOVEL,
+                           ArmFSMState::MOVEC, ArmFSMState::TRAJECTORY}) {
+    EXPECT_FALSE(z1_ros2_control::isSafeFsmState(state))
+      << z1_ros2_control::fsmStateName(state);
+    EXPECT_FALSE(z1_ros2_control::isServiceFsmState(state))
+      << z1_ros2_control::fsmStateName(state);
+    EXPECT_FALSE(z1_ros2_control::fsmStateTakesLabel(state))
+      << z1_ros2_control::fsmStateName(state);
+  }
+}
+
+/// The label is copied straight into `SendCmd::valueUnion.name`, so the two
+/// sizes have to agree and `kMaxLabelLength` has to leave room for the NUL that
+/// makes z1_ctrl's `std::string` terminated.
+TEST(Z1Protocol, LabelFitsInTheNameField)
+{
+  EXPECT_EQ(z1_ros2_control::kLabelCapacity, 10u);
+  EXPECT_EQ(z1_ros2_control::kMaxLabelLength, 9u);
+  EXPECT_EQ(offsetof(UNITREE_ARM::SendCmd, valueUnion), 7u);
+  // `name` and `jointCmd[0..2]` start at the same byte: writing a label while in
+  // JOINTCTRL would overwrite the first two and a half joint commands.
+  EXPECT_LE(z1_ros2_control::kLabelCapacity, sizeof(UNITREE_ARM::JointCmd));
+  // "startFlat" and "show_left" are entries of z1_ctrl's savedArmStates.csv.
+  EXPECT_LE(std::string("startFlat").size(), z1_ros2_control::kMaxLabelLength);
+}
+
 TEST(Z1Protocol, MotorErrorDecoding)
 {
   EXPECT_STREQ(z1_ros2_control::motorErrorToString(0x00), "ok");

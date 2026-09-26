@@ -1,0 +1,18 @@
+# Report where the link and the finite state machine currently stand. Read-only,
+# so this is safe to poll while the arm is moving.
+---
+# Last state z1_ctrl reported, e.g. "JOINTCTRL". "INVALID" until the first
+# RecvState arrives, i.e. while z1_ctrl is not running at all.
+string state
+
+# True between a successful on_activate() and on_deactivate(): the controllers
+# are allowed to command, and read() is transmitting frames.
+bool active
+
+# True while read() is putting SendCmd frames on the wire. This is set *before*
+# the on_activate() FSM handshake, because those frames are what carries the
+# handshake, so link_armed can briefly be true while active is still false.
+bool link_armed
+
+# True when a RecvState arrived within disconnect_timeout_ms.
+bool link_fresh

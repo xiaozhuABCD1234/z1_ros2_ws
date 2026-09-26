@@ -104,6 +104,25 @@ constexpr size_t kGripperIndex = 6;
 // Upstream's over-temperature limit (LowlevelState::temporatureLimit).
 constexpr int8_t kDefaultTemperatureLimit = 80;
 
+// ---------------------------------------------------------------------------
+// Labels.
+//
+// Four states are addressed not by joint angles but by a *name*: z1_ctrl reads
+// `ValueUnion::name`, looks the name up in its config/savedArmStates.csv and
+// drives the arm to (or saves the current pose as) that entry. The official SDK
+// calls them labelRun / labelSave / teach / teachRepeat.
+//
+// The field is a plain `char[10]` and z1_ctrl builds a std::string out of it, so
+// the label has to be NUL-terminated inside those bytes: at most
+// kMaxLabelLength characters.
+// ---------------------------------------------------------------------------
+constexpr size_t kLabelCapacity = 10;
+static_assert(
+  sizeof(UNITREE_ARM::ValueUnion{}.name) == kLabelCapacity, "ValueUnion::name must be 10 bytes");
+
+/// Longest label accepted on the wire: what fits in `name` plus a NUL.
+constexpr size_t kMaxLabelLength = kLabelCapacity - 1;
+
 // Motor_State::error bits, from the vendored header's comment block.
 constexpr uint8_t kErrorPhaseCurrent = 0x01;
 constexpr uint8_t kErrorPhaseLeakage = 0x02;
@@ -175,6 +194,11 @@ inline const char * fsmStateName(UNITREE_ARM::ArmFSMState state)
 
 /// Parse one of the names printed by `fsmStateName` (case-insensitive).
 /// Returns false for an unknown name; `out` is untouched then.
+///
+/// `LOWCMD` is deliberately absent from the table below: it hands raw motor
+/// commands to the arm and bypasses z1_ctrl's joint servo law, so nothing in
+/// this workspace may ask for it. `INVALID`, `NEXT` and the retired `SETTRAJ`
+/// are internal markers rather than states one can request.
 inline bool parseFsmStateName(const std::string & name, UNITREE_ARM::ArmFSMState & out)
 {
   static const std::pair<const char *, UNITREE_ARM::ArmFSMState> kTable[] = {
@@ -211,12 +235,81 @@ inline bool parseFsmStateName(const std::string & name, UNITREE_ARM::ArmFSMState
   return false;
 }
 
-/// Names accepted in the `activate_fsm_sequence` parameter. `LOWCMD` is
-/// deliberately absent: it bypasses the joint servo law and cannot be reached
-/// from a joint position command interface.
-inline const char * supportedFsmStates()
+/// Names accepted in the `activate_fsm_sequence` parameter, and by
+/// `set_fsm_state`.
+///
+/// These are the states this component can drive with nothing but a joint
+/// position command: exactly the ones that read neither `valueUnion.name` nor a
+/// posture / trajectory payload out of `SendCmd`. The states that are missing,
+/// and why (checked against `libZ1_x86_64.so`'s FSM; see
+/// thirdparty/unitree/z1/PROVENANCE.md):
+///
+///  * `CARTESIAN` reads `valueUnion` as six *doubles* (posture deltas), not as
+///    `jointCmd[]`: `movsd 0x7b(%rax)` in `State_Cartesian::run()` is
+///    `jointCmd[1].Pos`'s byte reinterpreted as a double. Since we only ever
+///    write floats there, the deltas would be garbage.
+///  * `MOVEJ` / `MOVEL` / `MOVEC` need a Cartesian target, and `TRAJECTORY`
+///    reads `valueUnion.trajCmd`; we send neither.
+///  * `LOWCMD` bypasses z1_ctrl's joint servo law entirely.
+inline const char * safeFsmStates()
 {
-  return "PASSIVE|JOINTCTRL|CARTESIAN|BACKTOSTART|TOSTATE|CALIBRATION|TEACH";
+  return "PASSIVE|JOINTCTRL|BACKTOSTART|CALIBRATION";
+}
+
+/// States addressed by a label rather than by joint angles: `TOSTATE` and
+/// `TEACH` / `TEACHREPEAT` / `SAVESTATE` build a std::string from
+/// `valueUnion.name` (`lea 0x5f(%rcx)` in each of their enter() functions,
+/// i.e. `SendCmd.valueUnion`), so a request for one of them has to carry one.
+///
+/// They are deliberately *not* part of `safeFsmStates()`: `activate_fsm_sequence`
+/// runs before any controller is alive to supply a label, so the union would
+/// still be empty and z1_ctrl would be asked to move to the entry whose name is
+/// the empty string. They are reachable through the `set_fsm_state` service
+/// instead, which always sends a label first.
+inline const char * labelledFsmStates()
+{
+  return "TOSTATE|SAVESTATE|TEACH|TEACHREPEAT";
+}
+
+/// States the `set_fsm_state` service accepts: `safeFsmStates()` plus
+/// `labelledFsmStates()`.
+inline const char * serviceFsmStates()
+{
+  return "PASSIVE|JOINTCTRL|BACKTOSTART|CALIBRATION|TOSTATE|SAVESTATE|TEACH|TEACHREPEAT";
+}
+
+/// True for the states that read `SendCmd::valueUnion.name`.
+inline bool fsmStateTakesLabel(UNITREE_ARM::ArmFSMState state)
+{
+  switch (state) {
+    case UNITREE_ARM::ArmFSMState::TOSTATE:
+    case UNITREE_ARM::ArmFSMState::SAVESTATE:
+    case UNITREE_ARM::ArmFSMState::TEACH:
+    case UNITREE_ARM::ArmFSMState::TEACHREPEAT:
+      return true;
+    default:
+      return false;
+  }
+}
+
+/// Member of `safeFsmStates()`, i.e. legal in `activate_fsm_sequence`.
+inline bool isSafeFsmState(UNITREE_ARM::ArmFSMState state)
+{
+  switch (state) {
+    case UNITREE_ARM::ArmFSMState::PASSIVE:
+    case UNITREE_ARM::ArmFSMState::JOINTCTRL:
+    case UNITREE_ARM::ArmFSMState::BACKTOSTART:
+    case UNITREE_ARM::ArmFSMState::CALIBRATION:
+      return true;
+    default:
+      return false;
+  }
+}
+
+/// Member of `serviceFsmStates()`, i.e. legal in a `set_fsm_state` request.
+inline bool isServiceFsmState(UNITREE_ARM::ArmFSMState state)
+{
+  return isSafeFsmState(state) || fsmStateTakesLabel(state);
 }
 
 }  // namespace z1_ros2_control

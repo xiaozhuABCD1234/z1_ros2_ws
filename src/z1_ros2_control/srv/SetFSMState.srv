@@ -1,0 +1,28 @@
+# Ask the official z1_ctrl process to enter one of its finite state machine
+# states.
+#
+# Only the states this component can actually drive are accepted:
+#
+#   PASSIVE|JOINTCTRL|BACKTOSTART|CALIBRATION|TOSTATE|SAVESTATE|TEACH|TEACHREPEAT
+#
+# CARTESIAN, MOVEJ, MOVEL, MOVEC, TRAJECTORY and LOWCMD are refused, with the
+# reason in `message`: they read valueUnion as a posture, a trajectory or raw
+# motor commands, and ros2_control only ever fills in joint positions. See
+# z1_ros2_control/README.md.
+
+# State name, case-insensitive.
+string state
+
+# Label for the states that z1_ctrl addresses by name - it looks the label up in
+# its config/savedArmStates.csv. Required (and at most 9 characters) for
+# TOSTATE, SAVESTATE, TEACH and TEACHREPEAT; must be empty for the others.
+string label
+---
+bool success
+
+# Why the request failed, or what z1_ctrl acknowledged when it succeeded.
+string message
+
+# What z1_ctrl reported by the time this call returned, whether it succeeded or
+# not. This is the same value as get_fsm_state would report.
+string current_state

@@ -19,13 +19,18 @@
 #include <atomic>
 #include <chrono>
 #include <cstdint>
+#include <memory>
+#include <mutex>
 #include <string>
 #include <vector>
 
 #include "hardware_interface/system_interface.hpp"
 #include "hardware_interface/types/hardware_component_interface_params.hpp"
 #include "hardware_interface/types/hardware_interface_return_values.hpp"
+#include "rclcpp/rclcpp.hpp"
 
+#include "z1_ros2_control/srv/get_fsm_state.hpp"
+#include "z1_ros2_control/srv/set_fsm_state.hpp"
 #include "z1_ros2_control/z1_protocol.hpp"
 #include "z1_ros2_control/z1_udp_client.hpp"
 
@@ -41,28 +46,34 @@ namespace z1_ros2_control
 /// so `z1_ctrl` keeps doing all the dangerous work and this class only moves
 /// joint positions in and joint state out.
 ///
-/// ### Threading, and why there are no locks anywhere
+/// ### Threading, and why there are no locks in the I/O path
 ///
 /// The component is declared `is_async="true"` in the URDF, so ros2_control
-/// runs `read()` and `write()` on its own worker thread, each cycle calling
-/// `read()` and then `write()` **on that one thread**. Consequences:
+/// runs `read()` and `write()` on its own worker thread at `rw_rate`, each cycle
+/// calling `write()` and then `read()` **on that one thread** - but *only while
+/// the component is ACTIVE*. ros2_control's `AsyncComponentThread` gates every
+/// call on the lifecycle state, which is why on_activate() has to drive the
+/// socket itself; see `pump_once()`. Consequences:
 ///
-///  * `read()` and `write()` are never concurrent with each other, so the
-///    command buffer and the link statistics need no synchronisation at all.
-///  * `write()` only publishes the command into `cmd_`; `read()` is what
-///    actually transmits it. A command therefore reaches the arm on the cycle
-///    *after* the controller produced it - one 2 ms frame, the same pipeline
-///    delay the official SDK has.
+///  * `pump_once()` is the only code that touches the socket or `cmd_`, and it is
+///    single-owner through `IoGuard`. Two threads can want to pump at once (the
+///    async worker and a service callback); the loser skips, it never waits.
+///  * `pump_once()` both receives and transmits. A command therefore reaches the
+///    arm on the cycle *after* the controller produced it - one frame, the same
+///    pipeline delay the official SDK has.
 ///  * Nothing in the I/O path may take a mutex, because the controller_manager
 ///    thread reads the state arrays concurrently. They are plain `double`s (see
 ///    `export_state_interfaces()`); a torn read would at worst mix joints from
 ///    two adjacent frames, which controllers tolerate, whereas a lock here would
-///    risk priority inversion against the 500 Hz thread.
+///    risk priority inversion against the worker thread.
 ///
-/// `rw_rate` must be 500, not 250: `z1_ctrl`'s `ARMSDK` loop runs at
-/// `dt = 0.002` s and considers a cycle without an incoming `SendCmd` to be a
-/// timeout. The controller_manager's own `update_rate` stays 250 to match the
-/// arm's servo loop.
+/// The one mutex in the class, `service_mutex_`, is taken by the `set_fsm_state`
+/// callback only. read()/write() never touch it.
+///
+/// `rw_rate` should be 500: `z1_ctrl`'s `ARMSDK` loop runs at `dt = 0.002` s and
+/// considers a cycle without an incoming `SendCmd` to be a timeout. What actually
+/// paces this component is whatever ros2_control hands to its async thread, so the
+/// measured rate is logged - see `report_read_rate()`.
 class Z1System : public hardware_interface::SystemInterface
 {
 public:
@@ -101,6 +112,25 @@ private:
   /// Read every `<param>` we understand out of the URDF `<hardware>` block.
   bool read_parameters(std::string & error);
 
+  /// Create `~/set_fsm_state` and `~/get_fsm_state` on the component's own node
+  /// (`get_node()`, which ros2_control adds to the controller_manager
+  /// executor), and tear them down again on cleanup.
+  void create_fsm_services();
+  /// `~/set_fsm_state`: validate, hand the label to read(), then wait for
+  /// z1_ctrl to report the transition. Non-realtime: it blocks this executor
+  /// thread for at most `fsm_timeout_ms_`.
+  void handle_set_fsm_state(
+    const std::shared_ptr<z1_ros2_control::srv::SetFSMState::Request> request,
+    std::shared_ptr<z1_ros2_control::srv::SetFSMState::Response> response);
+  /// `~/get_fsm_state`.
+  void handle_get_fsm_state(
+    const std::shared_ptr<z1_ros2_control::srv::GetFSMState::Request> request,
+    std::shared_ptr<z1_ros2_control::srv::GetFSMState::Response> response);
+
+  /// Publish `label` for read() to pick up, and wait until it has. See the
+  /// long comment on the label handshake in the .cpp.
+  bool publish_label(const std::string & label, std::string & error);
+
   /// Map a URDF joint name onto its motor slot in the packet.
   /// `joint1..joint6` -> 0..5, `jointGripper` -> 6, anything else -> -1.
   static int motor_index_for_joint(const std::string & joint_name);
@@ -109,14 +139,44 @@ private:
   void apply_state(const UNITREE_ARM::RecvState & state);
 
   /// Request an FSM state and wait until `z1_ctrl` reports it. Only called from
-  /// the non-realtime lifecycle callbacks.
-  bool request_state_and_wait(UNITREE_ARM::ArmFSMState state, std::string & error);
+  /// the non-realtime lifecycle and service callbacks.
+  bool request_state_and_wait(
+    UNITREE_ARM::ArmFSMState state, const std::string & label, std::string & error);
 
   /// Block until a packet has arrived within `disconnect_timeout_ms_`.
   bool wait_for_first_packet(std::string & error);
 
   /// True when a packet has arrived recently enough to trust the arm's state.
   bool link_is_fresh() const;
+
+  /// Report how fast ros2_control is actually calling read(), because that - not
+  /// `rw_rate` in the URDF - is what z1_ctrl's 2 ms ARMSDK loop sees. Logs once
+  /// when the first second is up, then only when the rate leaves a +/-20% band
+  /// around the last reported value, so a healthy 500 Hz run stays quiet.
+  /// Never returns an error: a slow cycle must not drop an arm that is standing
+  /// still and healthy (see the disconnect check in read()).
+  void report_read_rate(int64_t now_ns);
+
+  /// Pick up a label the set_fsm_state callback has staged (see the comment on
+  /// label_ in this header). Called at the top of pump_once(), so it works both
+  /// on the async thread and while a lifecycle callback is pumping.
+  void refresh_published_label();
+
+  /// One synchronous exchange with z1_ctrl: pick up a pending label, drain the
+  /// socket, fold the newest datagram into the state arrays, and - when the link
+  /// is armed - put the current frame on the wire. **This is the only code that
+  /// touches the socket.**
+  ///
+  /// read() calls it on the async worker thread, but only while the component is
+  /// ACTIVE: ros2_control's AsyncComponentThread checks
+  /// `get_lifecycle_state().id() == PRIMARY_STATE_ACTIVE` before every
+  /// read()/write(), so *nothing* calls read() during on_activate(). The
+  /// lifecycle and service callbacks therefore pump the socket themselves, which
+  /// is what makes the "listen for one RecvState, then ask for JOINTCTRL"
+  /// handshake in on_activate() work at all. See z1_ros2_control/README.md.
+  ///
+  /// \returns ERROR only for a hard socket failure; a quiet arm is `OK`.
+  hardware_interface::return_type pump_once(std::string & error);
 
   /// Returns a description of the first motor fault found, or an empty string.
   std::string first_motor_fault() const;
@@ -147,6 +207,33 @@ private:
   // Written by controllers through the command interfaces, consumed by write().
   std::array<double, kMotorCount> command_position_{};
 
+  // ---- the label handshake, and the one lock in this class ------------------
+  //
+  // A label is 10 bytes and only four states want one, but the same four states
+  // give z1_ctrl somewhere to jump to, so a torn label is not a cosmetic bug: it
+  // would address a different entry of savedArmStates.csv. `label_`/`label_epoch_`
+  // are written by the service thread and read by the async worker, so the writer
+  // bumps the epoch after the bytes and read() re-checks it after copying - a
+  // two-epoch read that fails is simply retried on the next 2 ms cycle, and the
+  // service callback waits for the publish before it arms the state request. No
+  // lock is involved, and read() never blocks on the service thread.
+  std::array<std::atomic<char>, kLabelCapacity> label_{};
+  std::atomic<uint32_t> label_epoch_{0};
+  /// Owned by the async worker: the last label read() managed to verify.
+  std::array<char, kLabelCapacity> published_label_{};
+  std::atomic<uint32_t> published_label_epoch_{0};
+
+  /// Set while one thread is inside pump_once()/write(), so that the async
+  /// worker and a lifecycle or service callback cannot assemble and send at the
+  /// same time. Lock-free on purpose; see IoGuard in the .cpp.
+  std::atomic<bool> io_busy_{false};
+
+  /// Serialises the service callbacks against each other (the executor may be
+  /// multithreaded). Never taken by read()/write().
+  std::mutex service_mutex_;
+  rclcpp::Service<z1_ros2_control::srv::SetFSMState>::SharedPtr set_state_service_;
+  rclcpp::Service<z1_ros2_control::srv::GetFSMState>::SharedPtr get_state_service_;
+
   // ---- diagnostics, only ever touched from the async thread -----------------
   std::array<int8_t, kMotorCount> motor_temperature_{};
   std::array<uint8_t, kMotorCount> motor_error_{};
@@ -154,6 +241,12 @@ private:
   std::string last_fault_message_;
   uint64_t cycles_ = 0;
   uint64_t cycles_without_packet_ = 0;
+
+  // ---- measured transport rate (diagnostics only), async thread only --------
+  int64_t rate_window_start_ns_ = 0;
+  uint32_t rate_window_cycles_ = 0;
+  /// 0 until the first measurement is logged.
+  double rate_reference_hz_ = 0.0;
 
   // ---- link ----------------------------------------------------------------
   Z1UdpClient udp_;

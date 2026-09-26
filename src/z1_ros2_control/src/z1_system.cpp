@@ -17,6 +17,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cstdlib>
+#include <cstring>
 #include <stdexcept>
 #include <string>
 #include <thread>
@@ -37,6 +38,14 @@ constexpr int kMaxDrainPerCycle = 16;
 
 /// How long the lifecycle callbacks sleep between polls of the async thread.
 constexpr auto kPollInterval = std::chrono::milliseconds(2);
+
+/// The label handshake between the service callbacks and read() must stay
+/// lock-free: read() runs on the 500 Hz worker thread. On x86-64 it does, but a
+/// standard library that decided otherwise would silently put a mutex in the
+/// realtime path, so check it at build time.
+static_assert(
+  std::atomic<char>::is_always_lock_free,
+  "the label handshake must not be able to take a lock on the 500 Hz thread");
 
 int64_t steady_ns()
 {
@@ -70,6 +79,43 @@ std::string trim(const std::string & text)
   const auto end = text.find_last_not_of(" \t\r\n");
   return text.substr(begin, end - begin + 1);
 }
+
+/// Keeps the socket and `cmd_` single-owner for the duration of one pump.
+///
+/// read() runs on the async worker, while a service callback runs on the
+/// controller_manager's executor and a lifecycle callback runs on whatever thread
+/// drove the transition - so two of them really can be inside pump_once() at the
+/// same time. That is not merely a duplicate-send problem: `assemble_frame()`
+/// writes `cmd_` field by field, so a datagram built while the other thread is
+/// rewriting it would carry a *different command*, not a stale one.
+///
+/// Skipping instead of waiting is deliberate: blocking here would put a lock in
+/// the 500 Hz path, and every caller either retries (the wait loops) or simply
+/// gets the other thread's frame (read()/write()).
+class IoGuard
+{
+public:
+  explicit IoGuard(std::atomic<bool> & busy)
+  : busy_(busy), owned_(!busy.exchange(true, std::memory_order_acq_rel))
+  {
+  }
+
+  ~IoGuard()
+  {
+    if (owned_) {
+      busy_.store(false, std::memory_order_release);
+    }
+  }
+
+  IoGuard(const IoGuard &) = delete;
+  IoGuard & operator=(const IoGuard &) = delete;
+
+  bool owned() const { return owned_; }
+
+private:
+  std::atomic<bool> & busy_;
+  bool owned_;
+};
 }  // namespace
 
 int Z1System::motor_index_for_joint(const std::string & joint_name)
@@ -225,8 +271,14 @@ bool Z1System::read_parameters(std::string & error)
       if (!token.empty()) {
         UNITREE_ARM::ArmFSMState state{};
         if (!parseFsmStateName(token, state)) {
-          error = "activate_fsm_sequence contains an unknown state '" + token + "'; expected " +
-                  supportedFsmStates();
+          error = "activate_fsm_sequence contains an unknown state '" + token + "'";
+          return false;
+        }
+        if (!isSafeFsmState(state)) {
+          // TOSTATE/SAVESTATE/TEACH/TEACHREPEAT need a label and CARTESIAN needs
+          // posture deltas; neither is available before the controllers are up.
+          error = "activate_fsm_sequence may only contain " + std::string(safeFsmStates()) +
+                  "; '" + token + "' is reached through the set_fsm_state service instead.";
           return false;
         }
         activate_sequence_.push_back(state);
@@ -237,7 +289,7 @@ bool Z1System::read_parameters(std::string & error)
       begin = comma + 1;
     }
     if (activate_sequence_.empty()) {
-      error = "activate_fsm_sequence is empty; expected " + std::string(supportedFsmStates());
+      error = "activate_fsm_sequence is empty; expected " + std::string(safeFsmStates());
       return false;
     }
   }
@@ -322,10 +374,50 @@ hardware_interface::CallbackReturn Z1System::on_configure(const rclcpp_lifecycle
   last_rx_steady_ns_.store(0);
   reported_state_.store(static_cast<int32_t>(UNITREE_ARM::ArmFSMState::INVALID));
 
+  // The services exist as soon as the component is configured, which happens at
+  // ros2_control_node startup - they can therefore report why activation is
+  // refusing to happen.
+  create_fsm_services();
+
   RCLCPP_INFO(
     get_logger(), "bound UDP port %u, sending to z1_ctrl at %s:%u", own_port_, ctrl_ip_.c_str(),
     ctrl_port_);
   return CallbackReturn::SUCCESS;
+}
+
+void Z1System::create_fsm_services()
+{
+  const auto node = get_node();
+  if (!node) {
+    // get_node() is the component's own node, which ros2_control creates when it
+    // loads the plugin and adds to the controller_manager's executor. Without it
+    // there is nowhere to serve the FSM from, and no other process can: z1_ctrl
+    // only ever answers the one client that binds 8072.
+    RCLCPP_WARN(
+      get_logger(),
+      "this hardware component has no node, so set_fsm_state/get_fsm_state are unavailable; "
+      "the FSM can then only be driven through activate_fsm_sequence and on_deactivate.");
+    return;
+  }
+
+  set_state_service_ = node->create_service<z1_ros2_control::srv::SetFSMState>(
+    "~/set_fsm_state",
+    [this](
+      const std::shared_ptr<z1_ros2_control::srv::SetFSMState::Request> request,
+      std::shared_ptr<z1_ros2_control::srv::SetFSMState::Response> response) {
+      handle_set_fsm_state(request, response);
+    });
+  get_state_service_ = node->create_service<z1_ros2_control::srv::GetFSMState>(
+    "~/get_fsm_state",
+    [this](
+      const std::shared_ptr<z1_ros2_control::srv::GetFSMState::Request> request,
+      std::shared_ptr<z1_ros2_control::srv::GetFSMState::Response> response) {
+      handle_get_fsm_state(request, response);
+    });
+
+  RCLCPP_INFO(
+    get_logger(), "%s/set_fsm_state and %s/get_fsm_state serve %s",
+    node->get_fully_qualified_name(), node->get_fully_qualified_name(), serviceFsmStates());
 }
 
 hardware_interface::CallbackReturn Z1System::on_activate(const rclcpp_lifecycle::State & /*previous_state*/)
@@ -349,16 +441,17 @@ hardware_interface::CallbackReturn Z1System::on_activate(const rclcpp_lifecycle:
   // This mirrors what the official SDK does in unitreeArm::startTrack().
   command_position_ = motor_position_;
 
-  // From here on read() transmits a frame every cycle. Doing this before the FSM
-  // handshake is deliberate: it is what carries the requested state to z1_ctrl.
+  // From here on pump_once() transmits a frame on every call, and it is the
+  // request_state_and_wait() loops below that provide those calls: read() is not
+  // running yet (see the note on pump_once in the header).
   link_armed_.store(true);
-  assemble_frame();
 
   for (const auto state : activate_sequence_) {
-    if (!request_state_and_wait(state, error)) {
+    if (!request_state_and_wait(state, "", error)) {
       RCLCPP_ERROR(get_logger(), "%s", error.c_str());
-      // Do not leave a half-claimed link behind; read() keeps sending, so the
-      // PASSIVE request will go out even though we failed forward.
+      // Do not leave a half-claimed link behind: dropping link_armed_ stops the
+      // frame train that carried the request, and z1_ctrl falls back to PASSIVE
+      // on its own when it stops hearing from us.
       link_armed_.store(false);
       return CallbackReturn::ERROR;
     }
@@ -367,8 +460,8 @@ hardware_interface::CallbackReturn Z1System::on_activate(const rclcpp_lifecycle:
   activated_.store(true);
   RCLCPP_INFO(
     get_logger(),
-    "active: z1_ctrl reports %s, commanding the measured pose. If this process dies, z1_ctrl "
-    "forces PASSIVE after ~20 ms and the arm loses its torque.",
+    "active: z1_ctrl reports %s, commanding the measured pose. If this process dies, z1_ctrl's "
+    "ARMSDK falls back to PASSIVE when the frames stop arriving and the arm loses its torque.",
     fsmStateName(static_cast<UNITREE_ARM::ArmFSMState>(reported_state_.load())));
   return CallbackReturn::SUCCESS;
 }
@@ -379,7 +472,7 @@ hardware_interface::CallbackReturn Z1System::on_deactivate(const rclcpp_lifecycl
 
   if (link_armed_.load() && deactivate_to_passive_) {
     std::string error;
-    if (!request_state_and_wait(UNITREE_ARM::ArmFSMState::PASSIVE, error)) {
+    if (!request_state_and_wait(UNITREE_ARM::ArmFSMState::PASSIVE, "", error)) {
       RCLCPP_WARN(get_logger(), "%s", error.c_str());
     }
   }
@@ -405,6 +498,8 @@ hardware_interface::CallbackReturn Z1System::on_cleanup(const rclcpp_lifecycle::
   // nothing to send here.
   link_armed_.store(false);
   activated_.store(false);
+  set_state_service_.reset();
+  get_state_service_.reset();
   udp_.close();
   RCLCPP_INFO(get_logger(), "link closed; z1_ctrl will fall back to PASSIVE on its own.");
   return CallbackReturn::SUCCESS;
@@ -414,23 +509,45 @@ hardware_interface::CallbackReturn Z1System::on_cleanup(const rclcpp_lifecycle::
 // Realtime cycle
 // ---------------------------------------------------------------------------
 
-hardware_interface::return_type Z1System::read(
-  const rclcpp::Time & /*time*/, const rclcpp::Duration & /*period*/)
+void Z1System::refresh_published_label()
 {
-  ++cycles_;
+  // An epoch-checked copy, not a lock: `label_` is written by the service thread,
+  // so a store can land in the middle of the byte loop below. Equal epochs mean
+  // no store happened between the first and the last byte, so `candidate` is one
+  // label and not a mixture of two. A failed check is simply retried on the next
+  // pump, and the service callback waits for the publish before it arms a state
+  // request, so a torn label never reaches the wire.
+  if (label_epoch_.load(std::memory_order_acquire) == published_label_epoch_) {
+    return;
+  }
+  const uint32_t before = label_epoch_.load(std::memory_order_acquire);
+  std::array<char, kLabelCapacity> candidate{};
+  for (size_t i = 0; i < kLabelCapacity; ++i) {
+    candidate[i] = label_[i].load(std::memory_order_relaxed);
+  }
+  if (label_epoch_.load(std::memory_order_acquire) == before) {
+    published_label_ = candidate;
+    published_label_epoch_.store(before, std::memory_order_release);
+  }
+}
 
-  // The async worker thread is started before on_init, so we are called while the
-  // component is still UNCONFIGURED and there is no socket yet.
-  if (!udp_.is_open()) {
+hardware_interface::return_type Z1System::pump_once(std::string & error)
+{
+  IoGuard guard(io_busy_);
+  if (!guard.owned()) {
+    // The async worker is already pumping, or a lifecycle transition is. Its
+    // frame is as good as ours, and every caller retries.
     return hardware_interface::return_type::OK;
   }
 
+  refresh_published_label();
+
   // Drain the socket and keep the newest well-formed packet. Reading only one
-  // datagram per cycle would make the reported state fall progressively further
+  // datagram per call would make the reported state fall progressively further
   // behind the arm.
   UNITREE_ARM::RecvState newest{};
   bool got_packet = false;
-  std::string error;
+  bool hard_error = false;
 
   for (int i = 0; i < kMaxDrainPerCycle; ++i) {
     const auto result = udp_.recv(newest, error);
@@ -447,9 +564,7 @@ hardware_interface::return_type Z1System::read(
     }
     // A genuine socket failure, e.g. ECONNREFUSED while z1_ctrl is not running.
     report_fault("link: " + error);
-    if (activated_.load()) {
-      return hardware_interface::return_type::ERROR;
-    }
+    hard_error = true;
     break;
   }
 
@@ -460,9 +575,9 @@ hardware_interface::return_type Z1System::read(
     ++cycles_without_packet_;
   }
 
-  // Transmit. Assembling here (rather than only in write()) is what makes the
-  // FSM handshake work: write() is not called until the component is ACTIVE,
-  // which only happens after on_activate() has already returned.
+  // Transmit. This is why the handshake has to be pumped: the frame carrying a
+  // state request is the only way to ask z1_ctrl for something, and ros2_control
+  // will not call read()/write() until this component is already ACTIVE.
   if (link_armed_.load()) {
     assemble_frame();
     if (!udp_.send(cmd_, error)) {
@@ -472,10 +587,36 @@ hardware_interface::return_type Z1System::read(
     }
   }
 
+  return hard_error ? hardware_interface::return_type::ERROR : hardware_interface::return_type::OK;
+}
+
+hardware_interface::return_type Z1System::read(
+  const rclcpp::Time & /*time*/, const rclcpp::Duration & /*period*/)
+{
+  ++cycles_;
+
+  // read() only runs while the component is ACTIVE, so this guard is about the
+  // window around on_cleanup(), which closes the socket before ros2_control has
+  // necessarily stopped calling us.
+  if (!udp_.is_open()) {
+    return hardware_interface::return_type::OK;
+  }
+
+  report_read_rate(steady_ns());
+
+  // The error text is only ever used by pump_once's own report_fault() calls, so a
+  // local is enough here.
+  std::string error;
+  const bool hard_error = pump_once(error) == hardware_interface::return_type::ERROR;
+
   if (!activated_.load()) {
     // While INACTIVE we still receive (and report) state, but a quiet arm is not
     // an error yet.
     return hardware_interface::return_type::OK;
+  }
+
+  if (hard_error) {
+    return hardware_interface::return_type::ERROR;
   }
 
   if (!link_is_fresh()) {
@@ -501,6 +642,12 @@ hardware_interface::return_type Z1System::write(
   // The frame is assembled and transmitted by read(); see the comment there.
   // write() assembles it too so that the buffer a controller just wrote into is
   // reflected immediately rather than one cycle late.
+  IoGuard guard(io_busy_);
+  if (!guard.owned()) {
+    // A lifecycle or service callback is mid-pump and will assemble a frame from
+    // the same command buffer; doing it twice at once is what the guard prevents.
+    return hardware_interface::return_type::OK;
+  }
   assemble_frame();
   return hardware_interface::return_type::OK;
 }
@@ -511,37 +658,55 @@ hardware_interface::return_type Z1System::write(
 
 void Z1System::assemble_frame()
 {
+  const auto requested = static_cast<UNITREE_ARM::ArmFSMState>(requested_state_.load());
+  const bool joint_control = requested == UNITREE_ARM::ArmFSMState::JOINTCTRL;
+
   cmd_.head[0] = kHead0;
   cmd_.head[1] = kHead1;
-
-  const auto requested = static_cast<UNITREE_ARM::ArmFSMState>(requested_state_.load());
   cmd_.state = requested;
-  // "track" tells z1_ctrl to follow jointCmd (JOINTCTRL) or posture[0]
-  // (CARTESIAN). For every other state the joint commands are ignored, so
-  // leaving it true would be harmless but misleading.
-  cmd_.track = (requested == UNITREE_ARM::ArmFSMState::JOINTCTRL);
+  // "track" tells z1_ctrl to follow jointCmd in JOINTCTRL. It is also what makes
+  // State_Cartesian follow the posture deltas it reads out of the same bytes, and
+  // CARTESIAN is not reachable from here - so leaving it true for anything else
+  // would only be misleading.
+  cmd_.track = joint_control;
 
-  for (size_t i = 0; i < kMotorCount; ++i) {
-    auto & joint_cmd = cmd_.valueUnion.jointCmd[i];
-    // z1_ctrl's joint servo law is fixed inside the controller, so gains are
-    // deliberately left at zero (upstream's own LOWCMD state reads only Pos and W
-    // out of this struct). Torque feed-forward is a LOWCMD feature and this
-    // interface does not expose it.
-    joint_cmd.T = 0.0F;
-    // Velocity feed-forward stays zero: the trajectory controller drives a
-    // position interface, and the arm's own loop differentiates it.
-    joint_cmd.W = 0.0F;
-    joint_cmd.K_P = 0.0F;
-    joint_cmd.K_W = 0.0F;
+  if (joint_control) {
+    for (size_t i = 0; i < kMotorCount; ++i) {
+      auto & joint_cmd = cmd_.valueUnion.jointCmd[i];
+      // z1_ctrl's joint servo law is fixed inside the controller, so gains are
+      // deliberately left at zero (upstream's own LOWCMD state reads only Pos and W
+      // out of this struct). Torque feed-forward is a LOWCMD feature and this
+      // interface does not expose it.
+      joint_cmd.T = 0.0F;
+      // Velocity feed-forward stays zero: the trajectory controller drives a
+      // position interface, and the arm's own loop differentiates it.
+      joint_cmd.W = 0.0F;
+      joint_cmd.K_P = 0.0F;
+      joint_cmd.K_W = 0.0F;
 
-    if (i == kGripperIndex && !has_gripper_) {
-      // No gripper joint in the URDF: track the measured angle instead of
-      // commanding 0, so that attaching a gripper later needs only
-      // use_gripper:=true and never sends it a surprise goal.
-      joint_cmd.Pos = static_cast<float>(motor_position_[i]);
-    } else {
-      joint_cmd.Pos = static_cast<float>(command_position_[i]);
+      if (i == kGripperIndex && !has_gripper_) {
+        // No gripper joint in the URDF: track the measured angle instead of
+        // commanding 0, so that attaching a gripper later needs only
+        // use_gripper:=true and never sends it a surprise goal.
+        joint_cmd.Pos = static_cast<float>(motor_position_[i]);
+      } else {
+        joint_cmd.Pos = static_cast<float>(command_position_[i]);
+      }
     }
+    return;
+  }
+
+  // Every other reachable state either ignores valueUnion (PASSIVE, BACKTOSTART,
+  // CALIBRATION) or reads it as `name`. Zeroing it keeps a stale jointCmd from
+  // being reinterpreted as something else - `name`, `jointCmd[0..2]` and
+  // `trajCmd` all start at the same byte.
+  std::memset(&cmd_.valueUnion, 0, sizeof(cmd_.valueUnion));
+
+  if (fsmStateTakesLabel(requested)) {
+    // published_label_ is always NUL-terminated: publish_label() rejects anything
+    // longer than kMaxLabelLength, so copying the whole field is safe and is what
+    // gives z1_ctrl a terminated std::string.
+    std::memcpy(cmd_.valueUnion.name, published_label_.data(), kLabelCapacity);
   }
 }
 
@@ -584,8 +749,18 @@ void Z1System::apply_state(const UNITREE_ARM::RecvState & state)
 std::string Z1System::first_motor_fault() const
 {
   for (size_t i = 0; i < kMotorCount; ++i) {
-    const char * name =
-      (i == kGripperIndex || i >= arm_joint_names_.size()) ? "gripper" : arm_joint_names_[i].c_str();
+    // Motor slot 6 only exists when the URDF declares jointGripper. When it does
+    // not, the slot is not ours: z1_ctrl keeps reporting whatever the arm's
+    // seventh motor connector does, and an unconnected connector reads as
+    // "motor disconnected". Treating that as a fault would make read() fail on
+    // every cycle of a perfectly healthy 6-axis arm, so the gripper slot is
+    // skipped entirely - disconnected, hot or otherwise - unless the URDF asks
+    // for it. This is the one fault that can only be found on a real arm.
+    if (i == kGripperIndex && !has_gripper_) {
+      continue;
+    }
+
+    const char * name = (i == kGripperIndex) ? "gripper" : arm_joint_names_[i].c_str();
 
     if ((motor_error_[i] & kErrorMask) != 0) {
       return std::string(name) + ": " + motorErrorToString(motor_error_[i]);
@@ -603,6 +778,36 @@ std::string Z1System::first_motor_fault() const
   return "";
 }
 
+void Z1System::report_read_rate(int64_t now_ns)
+{
+  ++rate_window_cycles_;
+  if (rate_window_start_ns_ == 0) {
+    rate_window_start_ns_ = now_ns;
+    rate_window_cycles_ = 0;
+    return;
+  }
+
+  const int64_t elapsed_ns = now_ns - rate_window_start_ns_;
+  if (elapsed_ns < 1000000000LL) {
+    return;
+  }
+
+  const double hz =
+    static_cast<double>(rate_window_cycles_) * 1e9 / static_cast<double>(elapsed_ns);
+  // First measurement always, then only when the rate leaves a wide band: at
+  // 500 Hz the odd dropped cycle is normal, a halving of the rate is not.
+  if (rate_reference_hz_ == 0.0 || hz < rate_reference_hz_ * 0.8 ||
+      hz > rate_reference_hz_ * 1.25) {
+    RCLCPP_INFO(
+      get_logger(), "read() is being called at %.0f Hz (rw_rate in the URDF says %u).", hz,
+      get_hardware_info().rw_rate);
+    rate_reference_hz_ = hz;
+  }
+
+  rate_window_start_ns_ = now_ns;
+  rate_window_cycles_ = 0;
+}
+
 bool Z1System::link_is_fresh() const
 {
   const int64_t last = last_rx_steady_ns_.load();
@@ -614,9 +819,16 @@ bool Z1System::link_is_fresh() const
 
 bool Z1System::wait_for_first_packet(std::string & error)
 {
+  // Nothing transmits yet - link_armed_ is still false, because a zeroed SendCmd
+  // would be a command to the zero pose - but z1_ctrl sends RecvState whether or
+  // not anyone is its client (verified against the real controller: it keeps
+  // streaming at ~10 Hz with no SendCmd ever arriving), so listening is enough to
+  // learn where the arm is.
   const auto deadline =
     std::chrono::steady_clock::now() + std::chrono::milliseconds(fsm_timeout_ms_);
   while (std::chrono::steady_clock::now() < deadline) {
+    std::string pump_error;
+    pump_once(pump_error);
     if (link_is_fresh()) {
       return true;
     }
@@ -627,9 +839,61 @@ bool Z1System::wait_for_first_packet(std::string & error)
   return false;
 }
 
-bool Z1System::request_state_and_wait(UNITREE_ARM::ArmFSMState state, std::string & error)
+bool Z1System::publish_label(const std::string & label, std::string & error)
 {
-  requested_state_.store(static_cast<int32_t>(state));
+  if (label.size() > kMaxLabelLength) {
+    error = "label '" + label + "' is longer than " + std::to_string(kMaxLabelLength) +
+            " characters; z1_ctrl reads it out of a char[10] and builds a std::string from it";
+    return false;
+  }
+
+  const uint32_t epoch = label_epoch_.load(std::memory_order_relaxed) + 1;
+  for (size_t i = 0; i < kLabelCapacity; ++i) {
+    label_[i].store(i < label.size() ? label[i] : '\0', std::memory_order_relaxed);
+  }
+  // Release: the bytes above happen-before any load that observes this epoch.
+  label_epoch_.store(epoch, std::memory_order_release);
+
+  // Do not point z1_ctrl at the state before the label has been taken up: z1_ctrl
+  // reads `name` when it *enters* the state, so the first frame that carries the
+  // state also has to carry a correct label. pump_once() is what performs that
+  // copy, and it runs here because read() is not being called while a service
+  // callback or a lifecycle transition is in progress - no wait: the service
+  // callback runs on the controller_manager's executor, *alongside* the async
+  // worker, so this loop and read() both pump. Both are safe to run at once (see
+  // the note in the README), and this one only needs to see the epoch move.
+  const auto deadline =
+    std::chrono::steady_clock::now() + std::chrono::milliseconds(fsm_timeout_ms_);
+  while (std::chrono::steady_clock::now() < deadline) {
+    if (published_label_epoch_.load(std::memory_order_acquire) == epoch) {
+      return true;
+    }
+    if (!udp_.is_open()) {
+      error = "cannot hand the label to the I/O path: the link to z1_ctrl is closed";
+      return false;
+    }
+    std::string pump_error;
+    pump_once(pump_error);
+    std::this_thread::sleep_for(kPollInterval);
+  }
+  error = "the label was not taken up by the I/O path within " + std::to_string(fsm_timeout_ms_) +
+          " ms";
+  return false;
+}
+
+bool Z1System::request_state_and_wait(
+  UNITREE_ARM::ArmFSMState state, const std::string & label, std::string & error)
+{
+  // The label has to be published before the state is requested; see
+  // publish_label().
+  if (fsmStateTakesLabel(state) && !publish_label(label, error)) {
+    return false;
+  }
+
+  // Stored even when z1_ctrl already reports `state`: read() transmits whatever
+  // is in here, so leaving it at its previous value would let the next frame
+  // undo a request that we reported as done.
+  requested_state_.store(static_cast<int32_t>(state), std::memory_order_release);
 
   const auto deadline =
     std::chrono::steady_clock::now() + std::chrono::milliseconds(fsm_timeout_ms_);
@@ -641,7 +905,11 @@ bool Z1System::request_state_and_wait(UNITREE_ARM::ArmFSMState state, std::strin
       error = std::string("asked z1_ctrl for ") + fsmStateName(state) + " but the link is closed";
       return false;
     }
-    // read() on the worker thread is what transmits the request.
+    // pump_once() is what puts the request on the wire: read() is not running
+    // during on_activate(), and during a service call it is running in parallel
+    // (both ends are safe to pump at once, see the README).
+    std::string pump_error;
+    pump_once(pump_error);
     std::this_thread::sleep_for(kPollInterval);
   }
 
@@ -651,6 +919,112 @@ bool Z1System::request_state_and_wait(UNITREE_ARM::ArmFSMState state, std::strin
           ". Not every FSM transition is legal from every state - see "
           "z1_ros2_control/README.md for the known-good sequences.";
   return false;
+}
+
+// ---------------------------------------------------------------------------
+// FSM services
+// ---------------------------------------------------------------------------
+
+void Z1System::handle_set_fsm_state(
+  const std::shared_ptr<z1_ros2_control::srv::SetFSMState::Request> request,
+  std::shared_ptr<z1_ros2_control::srv::SetFSMState::Response> response)
+{
+  // The controller_manager's executor may be multithreaded, and two overlapping
+  // transitions would interleave their `requested_state_` stores. read() and
+  // write() never take this lock, so the 500 Hz thread cannot be blocked by it.
+  std::lock_guard<std::mutex> guard(service_mutex_);
+
+  const auto reported = static_cast<UNITREE_ARM::ArmFSMState>(reported_state_.load());
+  response->success = false;
+  response->current_state = fsmStateName(reported);
+
+  UNITREE_ARM::ArmFSMState state{};
+  if (!parseFsmStateName(request->state, state)) {
+    response->message = "unknown state '" + request->state + "'; this component accepts " +
+                        serviceFsmStates();
+    return;
+  }
+  if (!isServiceFsmState(state)) {
+    response->message =
+      std::string(fsmStateName(state)) +
+      " is not reachable through this interface: it reads a Cartesian posture, a trajectory or raw "
+      "motor commands out of SendCmd, and this component only ever fills in joint positions. It "
+      "accepts " + serviceFsmStates() + ".";
+    return;
+  }
+  if (fsmStateTakesLabel(state)) {
+    if (request->label.empty()) {
+      response->message =
+        std::string(fsmStateName(state)) +
+        " is addressed by a label, so `label` has to name an entry of z1_ctrl's "
+        "config/savedArmStates.csv (e.g. forward, startFlat, show_left, show_mid, show_right).";
+      return;
+    }
+    if (request->label.size() > kMaxLabelLength) {
+      response->message = "label '" + request->label + "' is longer than " +
+                          std::to_string(kMaxLabelLength) + " characters";
+      return;
+    }
+  } else if (!request->label.empty()) {
+    response->message = std::string(fsmStateName(state)) +
+                        " does not read a label (it would overlay jointCmd[0] in the union), so "
+                        "`label` has to be empty for it";
+    return;
+  }
+
+  if (!link_armed_.load()) {
+    response->message =
+      "the link to z1_ctrl is not armed, so no request can be delivered. Activate the hardware "
+      "component first, e.g. ros2 control set_hardware_component_state z1 active";
+    return;
+  }
+
+  if (reported == state) {
+    // Keep the outgoing frames consistent with what we report, but say plainly
+    // that nothing was requested: z1_ctrl's checkChange() ignores a request for
+    // the state it is already in, so a second TOSTATE while already in TOSTATE is
+    // a no-op rather than a new target.
+    requested_state_.store(static_cast<int32_t>(state), std::memory_order_release);
+    response->success = true;
+    response->current_state = fsmStateName(state);
+    response->message = std::string("z1_ctrl already reports ") + fsmStateName(state) +
+                        "; nothing was requested" +
+                        (fsmStateTakesLabel(state)
+                           ? " - the FSM does not re-enter the state it is already in, so a new "
+                             "label only takes effect after leaving it (e.g. via JOINTCTRL)"
+                           : "");
+    return;
+  }
+
+  std::string error;
+  if (!request_state_and_wait(state, request->label, error)) {
+    response->message = error;
+    response->current_state =
+      fsmStateName(static_cast<UNITREE_ARM::ArmFSMState>(reported_state_.load()));
+    return;
+  }
+
+  response->success = true;
+  response->current_state = fsmStateName(state);
+  response->message = std::string(fsmStateName(state)) + " acknowledged by z1_ctrl";
+  if (request->label.empty()) {
+    RCLCPP_INFO(
+      get_logger(), "set_fsm_state: %s -> %s", fsmStateName(reported), fsmStateName(state));
+  } else {
+    RCLCPP_INFO(
+      get_logger(), "set_fsm_state: %s -> %s (label '%s')", fsmStateName(reported),
+      fsmStateName(state), request->label.c_str());
+  }
+}
+
+void Z1System::handle_get_fsm_state(
+  const std::shared_ptr<z1_ros2_control::srv::GetFSMState::Request> /*request*/,
+  std::shared_ptr<z1_ros2_control::srv::GetFSMState::Response> response)
+{
+  response->state = fsmStateName(static_cast<UNITREE_ARM::ArmFSMState>(reported_state_.load()));
+  response->active = activated_.load();
+  response->link_armed = link_armed_.load();
+  response->link_fresh = link_is_fresh();
 }
 
 void Z1System::report_fault(const std::string & message)
