@@ -1,0 +1,20 @@
+<library path="z1_ros2_control">
+  <class name="z1_ros2_control/Z1System"
+         type="z1_ros2_control::Z1System"
+         base_class_type="hardware_interface::SystemInterface">
+    <description>
+      Real Unitree Z1 arm behind the official z1_controller.
+
+      Declares a joint position command interface (joint1..joint6, plus
+      jointGripper when the URDF has it) and position/velocity/effort state
+      interfaces, all from a single 208-byte RecvState datagram per cycle.
+
+      The official z1_ctrl process must be running on the same machine: it owns
+      the 250 Hz loop to the arm, the finite state machine, the inverse
+      kinematics and the collision detection, and this component only exchanges
+      SendCmd/RecvState datagrams with it on 127.0.0.1.
+
+      Must be declared is_async="true" rw_rate="500" - see the package README.
+    </description>
+  </class>
+</library>

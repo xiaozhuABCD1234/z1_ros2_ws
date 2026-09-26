@@ -1,0 +1,30 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>z1_ros2_control</name>
+  <version>0.1.0</version>
+  <description>
+    ros2_control SystemInterface for a real Unitree Z1 arm driven by the official
+    z1_controller. The hardware component is a UDP client of the z1_ctrl process
+    on loopback, speaking the same 147-byte SendCmd / 208-byte RecvState protocol
+    as the official z1_sdk, so z1_ctrl keeps owning the 250 Hz servo loop, the
+    FSM, the kinematics and the collision guard.
+  </description>
+  <maintainer email="xiaozhu@example.com">xiaozhu</maintainer>
+  <license>BSD-3-Clause</license>
+
+  <buildtool_depend>ament_cmake</buildtool_depend>
+
+  <depend>hardware_interface</depend>
+  <depend>pluginlib</depend>
+  <depend>rclcpp</depend>
+  <depend>rclcpp_lifecycle</depend>
+
+  <test_depend>ament_cmake_gtest</test_depend>
+
+  <export>
+    <build_type>ament_cmake</build_type>
+    <!-- The vendored Unitree protocol header is BSD 3-Clause; see
+         thirdparty/unitree/z1/LICENSE. This package itself is BSD-3-Clause. -->
+  </export>
+</package>
